@@ -9,6 +9,9 @@
 #include <qnamespace.h>
 
 #include "freerdp/freerdp.h"
+#include "freerdp/input.h"
+
+#include "qf_util.h"
 
 class RdpViewItem : public QQuickPaintedItem
 {
@@ -112,12 +115,40 @@ public:
         event->accept();
     }
 
-    void keyPressEvent(QKeyEvent* event) override {
+    void keyboardUnicodeEventSend(QKeyEvent* event, bool down)
+    {
+        if (!m_rdpContext)
+            return;
 
+        UINT32 freerdp_key_code = qf::to_freerdp_key_code(event);
+        if (freerdp_key_code == RDP_SCANCODE_UNKNOWN) {
+            
+            uint16_t flags = down ? 0 : KBD_FLAGS_RELEASE;
+            if (!event->text().isEmpty())
+            {
+                if(!freerdp_input_send_unicode_keyboard_event(m_rdpContext->input, flags, event->text().unicode()->unicode()))
+                {
+                    printf("Failed to send unicode keyboard event, %s\n", event->text().toUtf8().constData());
+                    return;
+                }
+            }
+            printf("Unknown Qt key %d, text='%s'\n", event->key(), event->text().toUtf8().constData());
+            return;
+        }
+
+        printf("Key %d %s, rdp_scancode=0x%04x\n", event->key(), down ? "down" : "up",
+               freerdp_key_code);
+        freerdp_input_send_keyboard_event_ex(m_rdpContext->input, down,
+                                             down && event->isAutoRepeat(), freerdp_key_code);
+    }
+
+    void keyPressEvent(QKeyEvent* event) override {
+        keyboardUnicodeEventSend(event, true);
         
         event->accept();
     }
     void keyReleaseEvent(QKeyEvent* event) override {
+        keyboardUnicodeEventSend(event, false);
         
         event->accept();
     }
