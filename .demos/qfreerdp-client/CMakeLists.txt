@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.16)
-project(qf-client LANGUAGES CXX)
+project(qf-client LANGUAGES C CXX)
 
-set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
@@ -18,6 +18,10 @@ find_package(FreeRDP-Client 3 REQUIRED)
 # 2. 定义可执行目标（使用 Qt 专属的包装函数）
 qt_add_executable(qf-client
     mini-qf-client.cc
+    qf_channel_client_handler.c
+    ../../channels/cliprdr/client/cliprdr_main.c
+    ../../channels/cliprdr/client/cliprdr_format.c
+    ../../channels/cliprdr/cliprdr_common.c
 )
 
 # 3. 注册 QML 模块
@@ -35,6 +39,7 @@ target_include_directories(qf-client PRIVATE
     ${FreeRDP_INCLUDE_DIR}
     ${FreeRDP-Client_INCLUDE_DIR}
     ${WinPR_INCLUDE_DIR}
+    ${CMAKE_CURRENT_SOURCE_DIR}/../..
 )
 
 # 4. 链接 Qt 模块

@@ -6,9 +6,15 @@
 #include <QMutex>
 #include <QPainter>
 #include <QtQml/qqmlregistration.h>
+#include <qeventloop.h>
 #include <qnamespace.h>
+#include <QGuiApplication>
+#include <QClipboard>
+#include <QMimeData>
+#include <QByteArray>
 
 #include "freerdp/freerdp.h"
+#include "freerdp/client/cliprdr.h"
 #include "freerdp/input.h"
 
 #include "qf_util.h"
@@ -23,11 +29,21 @@ public:
         setAcceptHoverEvents(true);
         setFlag(QQuickItem::ItemIsFocusScope, true);
         setFocus(true);
+
+        connect(QGuiApplication::clipboard(), &QClipboard::dataChanged, this, &RdpViewItem::dataChangedCallback);
     }
     ~RdpViewItem() = default;
 
     void setFreeRDP_context(rdpContext* context) {
         m_rdpContext = context;
+    }
+
+    void set_clipboard_client_context(CliprdrClientContext* clipboard_client_context) {
+        m_clipboardClientContext = clipboard_client_context;
+    }
+
+    void set_clipboard_data_memory(const std::shared_ptr<char[]>& data) {
+        m_clipboard_ready_data_ = data;
     }
 
     void paint(QPainter* painter) override {
@@ -80,7 +96,9 @@ public:
             printf("Failed to send mouse event\n");
         }
 
+        #if 0
         printf("Mouse event sent, event: %s, x: %d, y: %d\n", get_mouse_flags_string(freerdp_mouse_event).c_str(), map_x, map_y);
+        #endif
     }
 
     void mousePressEvent(QMouseEvent* event) override {
@@ -153,8 +171,64 @@ public:
         event->accept();
     }
 
+
+    void updateClipboardDataFromRemote(const QByteArray& data) {
+        if (!m_clipboardClientContext)
+        {
+            printf("No clipboard client context\n");
+            return;
+        }
+
+        qsizetype charCount = data.size() / static_cast<qsizetype>(sizeof(char16_t));
+        const char16_t* textData = reinterpret_cast<const char16_t*>(data.constData());
+        if (charCount > 0 && textData[charCount - 1] == u'\0')
+            --charCount;
+
+        QString text = QString::fromUtf16(textData, charCount);
+        m_clipboardDataFromRemote = true;
+        QGuiApplication::clipboard()->setText(text);
+        m_clipboardDataFromRemote = false;
+        printf("Updated clipboard with remote text data: %s\n", text.toUtf8().constData());
+    }
+
+    // plugin for clipboard
+    void dataChangedCallback() {
+        if(!m_clipboardClientContext)
+        {
+            printf("No clipboard client context\n");
+            return;
+        }
+
+        if (m_clipboardDataFromRemote)
+        {
+            printf("Clipboard data from remote\n");
+            return;
+        }
+
+        QClipboard* clipboard = QGuiApplication::clipboard();
+        const QMimeData* mimeData = clipboard->mimeData();
+
+        if (mimeData->hasText()) {
+            CLIPRDR_FORMAT_LIST format_list = {};
+
+            CLIPRDR_FORMAT format = {};
+            format.formatId = CF_UNICODETEXT;
+
+            format_list.numFormats = 1;
+            format_list.formats = &format; // Clipboard data is in Unicode format
+
+            m_clipboardClientContext->ClientFormatList(m_clipboardClientContext, &format_list);
+        }
+    }
+
+signals:
+    void clipboardDataResponseFromRemote();
+
 private:
     QImage m_frame;
     QMutex m_mutex; // Mutex for thread-safe access to m_frame
     rdpContext* m_rdpContext;
+    CliprdrClientContext* m_clipboardClientContext; // Clipboard client context for clipboard operations
+    bool m_clipboardDataFromRemote = false;
+    std::shared_ptr<char[]> m_clipboard_ready_data_; // Clipboard data memory
 };
