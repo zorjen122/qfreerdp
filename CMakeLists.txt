@@ -4,6 +4,7 @@ project(qf-client LANGUAGES C CXX)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+set(CLIPRDR_REF_DIR "${CMAKE_CURRENT_SOURCE_DIR}/ref-tmp")
 
 # 自动处理 Qt 的元对象和资源系统
 set(CMAKE_AUTOMOC ON)
@@ -19,9 +20,9 @@ find_package(FreeRDP-Client 3 REQUIRED)
 qt_add_executable(qf-client
     mini-qf-client.cc
     qf_channel_client_handler.c
-    ../../channels/cliprdr/client/cliprdr_main.c
-    ../../channels/cliprdr/client/cliprdr_format.c
-    ../../channels/cliprdr/cliprdr_common.c
+    ${CLIPRDR_REF_DIR}/cliprdr_main.c
+    ${CLIPRDR_REF_DIR}/cliprdr_format.c
+    ${CLIPRDR_REF_DIR}/cliprdr_common.c
 )
 
 # 3. 注册 QML 模块
@@ -39,7 +40,7 @@ target_include_directories(qf-client PRIVATE
     ${FreeRDP_INCLUDE_DIR}
     ${FreeRDP-Client_INCLUDE_DIR}
     ${WinPR_INCLUDE_DIR}
-    ${CMAKE_CURRENT_SOURCE_DIR}/../..
+    ${CLIPRDR_REF_DIR}
 )
 
 # 4. 链接 Qt 模块

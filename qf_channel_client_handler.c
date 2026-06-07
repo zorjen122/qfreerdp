@@ -9,7 +9,7 @@
 #include <winpr/crt.h>
 #include <winpr/synch.h>
 
-#include "channels/client/addin.h"
+#include "addin.h"
 
 #define TAG CHANNELS_TAG("qf.addin")
 
