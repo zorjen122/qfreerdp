@@ -12,6 +12,8 @@
 #include <QClipboard>
 #include <QMimeData>
 #include <QByteArray>
+#include <QtEndian>
+#include <winpr/user.h>
 
 #include "freerdp/freerdp.h"
 #include "freerdp/client/cliprdr.h"
@@ -172,23 +174,104 @@ public:
     }
 
 
-    void updateClipboardDataFromRemote(const QByteArray& data) {
+    static QImage imageFromDib(const QByteArray& dib) {
+        if (dib.size() < 40)
+            return {};
+
+        const uchar* bytes = reinterpret_cast<const uchar*>(dib.constData());
+        const quint32 headerSize = qFromLittleEndian<quint32>(bytes);
+        if (headerSize < 12 || static_cast<qsizetype>(headerSize) > dib.size())
+            return {};
+
+        quint16 bitCount = 0;
+        quint32 compression = 0;
+        quint32 colorUsed = 0;
+        if (headerSize >= 40 && dib.size() >= 40)
+        {
+            bitCount = qFromLittleEndian<quint16>(bytes + 14);
+            compression = qFromLittleEndian<quint32>(bytes + 16);
+            colorUsed = qFromLittleEndian<quint32>(bytes + 32);
+        }
+
+        quint32 colorTableBytes = 0;
+        if (colorUsed > 0)
+            colorTableBytes = colorUsed * 4;
+        else if (bitCount > 0 && bitCount <= 8)
+            colorTableBytes = (1u << bitCount) * 4;
+
+        const quint32 bitfieldsBytes = (headerSize == 40 && compression == 3) ? 12 : 0;
+        const quint32 pixelOffset = 14 + headerSize + bitfieldsBytes + colorTableBytes;
+        const quint32 fileSize = 14 + static_cast<quint32>(dib.size());
+
+        QByteArray bmp;
+        bmp.reserve(static_cast<qsizetype>(fileSize));
+        bmp.append('B');
+        bmp.append('M');
+
+        auto appendLe16 = [&bmp](quint16 value) {
+            char buffer[2];
+            qToLittleEndian(value, reinterpret_cast<uchar*>(buffer));
+            bmp.append(buffer, sizeof(buffer));
+        };
+        auto appendLe32 = [&bmp](quint32 value) {
+            char buffer[4];
+            qToLittleEndian(value, reinterpret_cast<uchar*>(buffer));
+            bmp.append(buffer, sizeof(buffer));
+        };
+
+        appendLe32(fileSize);
+        appendLe16(0);
+        appendLe16(0);
+        appendLe32(pixelOffset);
+        bmp.append(dib);
+
+        return QImage::fromData(bmp, "BMP");
+    }
+
+    void updateClipboardDataFromRemote(const QByteArray& data, uint32_t formatId,
+                                       const QString& formatName) {
         if (!m_clipboardClientContext)
         {
             printf("No clipboard client context\n");
             return;
         }
 
-        qsizetype charCount = data.size() / static_cast<qsizetype>(sizeof(char16_t));
-        const char16_t* textData = reinterpret_cast<const char16_t*>(data.constData());
-        if (charCount > 0 && textData[charCount - 1] == u'\0')
-            --charCount;
-
-        QString text = QString::fromUtf16(textData, charCount);
         m_clipboardDataFromRemote = true;
-        QGuiApplication::clipboard()->setText(text);
+
+        if (formatName == QStringLiteral("PNG"))
+        {
+            QImage image = QImage::fromData(data, "PNG");
+            if (!image.isNull())
+            {
+                QGuiApplication::clipboard()->setImage(image);
+                printf("Updated clipboard with remote image data\n");
+            }
+            else
+                printf("Failed to decode remote PNG data, size=%lld\n", static_cast<long long>(data.size()));
+        }
+        else if (formatId == CF_DIB || formatId == CF_DIBV5)
+        {
+            QImage image = imageFromDib(data);
+            if (!image.isNull())
+            {
+                QGuiApplication::clipboard()->setImage(image);
+                printf("Updated clipboard with remote DIB image data\n");
+            }
+            else
+                printf("Failed to decode remote DIB data, size=%lld\n", static_cast<long long>(data.size()));
+        }
+        else if(formatId == CF_UNICODETEXT)
+        {
+            qsizetype charCount = data.size() / static_cast<qsizetype>(sizeof(char16_t));
+            const char16_t* textData = reinterpret_cast<const char16_t*>(data.constData());
+            if (charCount > 0 && textData[charCount - 1] == u'\0')
+                --charCount;
+
+            QString text = QString::fromUtf16(textData, charCount);
+            QGuiApplication::clipboard()->setText(text);
+            printf("Updated clipboard with remote text data: %s\n", text.toUtf8().constData());
+        }
         m_clipboardDataFromRemote = false;
-        printf("Updated clipboard with remote text data: %s\n", text.toUtf8().constData());
     }
 
     // plugin for clipboard
@@ -205,19 +288,48 @@ public:
             return;
         }
 
-        QClipboard* clipboard = QGuiApplication::clipboard();
-        const QMimeData* mimeData = clipboard->mimeData();
+        auto RemoteClipboardFormatList = [this](uint32_t formatId, const char* formatName) {
 
-        if (mimeData->hasText()) {
             CLIPRDR_FORMAT_LIST format_list = {};
 
             CLIPRDR_FORMAT format = {};
-            format.formatId = CF_UNICODETEXT;
+            format.formatId = formatId;
+            format.formatName = const_cast<char*>(formatName);
 
             format_list.numFormats = 1;
             format_list.formats = &format; // Clipboard data is in Unicode format
 
             m_clipboardClientContext->ClientFormatList(m_clipboardClientContext, &format_list);
+            printf("Clipboard local format list, format: %d, name: %s\n", formatId,
+                   formatName ? formatName : "");
+
+        };
+
+        QClipboard* clipboard = QGuiApplication::clipboard();
+        const QMimeData* mimeData = clipboard->mimeData();
+
+        if (mimeData->hasText()) {
+            RemoteClipboardFormatList(CF_UNICODETEXT, nullptr);
+        }
+        else if (mimeData->hasImage()) {
+            
+            CLIPRDR_FORMAT_LIST format_list = {};
+
+            CLIPRDR_FORMAT formats[2] = {};
+            formats[0].formatId = qf::CLIPBOARD_FORMAT_PNG;
+            formats[0].formatName = const_cast<char*>("PNG");
+            formats[1].formatId = CF_DIB;
+            formats[1].formatName = nullptr;
+
+            format_list.numFormats = 2;
+            format_list.formats = formats; // Clipboard data is in Unicode format
+
+            m_clipboardClientContext->ClientFormatList(m_clipboardClientContext, &format_list);
+            
+            printf("Clipboard local format list, format: %d, name: %s\n", formats[0].formatId,
+                  formats[0].formatName ? formats[0].formatName : "");
+            printf("Clipboard local format list, format: %d, name: %s\n", formats[1].formatId,
+                  formats[1].formatName ? formats[1].formatName : "");
         }
     }
 

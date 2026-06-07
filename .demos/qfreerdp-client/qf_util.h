@@ -127,4 +127,5 @@ inline UINT to_freerdp_key_code(const QKeyEvent* event)
     }
 }
 
+    static constexpr UINT32 CLIPBOARD_FORMAT_PNG = 0xC001;
 }; // namespace qf

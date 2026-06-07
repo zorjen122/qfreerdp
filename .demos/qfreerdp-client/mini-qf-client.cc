@@ -19,6 +19,7 @@
 #include <QQmlApplicationEngine>
 #include <QUrl>
 #include <QClipboard>
+#include <QBuffer>
 #include <QMimeData>
 #include <map>
 
@@ -30,6 +31,7 @@
 #include <freerdp/client/channels.h>
 #include <freerdp/channels/channels.h>
 
+#include "qf_util.h"
 #include "rdp-view-item.h"
 
 #define TAG CLIENT_TAG("sample")
@@ -42,6 +44,8 @@ struct client_t
 	uint32_t view_width_ = 1024;
 	uint32_t view_height_ = 768;
 
+	uint32_t requested_remote_format_id_ = 0;
+	std::string requested_remote_format_name;
 	std::map<uint32_t, std::string> clipboard_format_from_remote_;
 	std::atomic<bool> clipboard_data_request_ready_event_;
 };
@@ -196,19 +200,52 @@ UINT qf_CliprdrServerFormatListCallBack(CliprdrClientContext* context,
 		       formatList->formats[i].formatId, name);
 	}
 
+	auto requestRemoteFormat = [&](UINT32 formatId, const char* formatName)
+	{
+		CLIPRDR_FORMAT_DATA_REQUEST req = WINPR_C_ARRAY_INIT;
+		req.requestedFormatId = formatId;
+
+		g_client.requested_remote_format_id_ = formatId;
+		g_client.requested_remote_format_name = formatName ? formatName : "";
+
+		context->ClientFormatDataRequest(context, &req);
+	};
+
 	if (g_client.clipboard_format_from_remote_.contains(CF_UNICODETEXT))
 	{
 		printf("Remote clipboard supports CF_UNICODETEXT format\n");
-		CLIPRDR_FORMAT_DATA_REQUEST req = WINPR_C_ARRAY_INIT;
-		req.requestedFormatId = CF_UNICODETEXT;
-
-		context->ClientFormatDataRequest(context, &req);
+		requestRemoteFormat(CF_UNICODETEXT, nullptr);
+		return CHANNEL_RC_OK;
 	}
-	else
+
+	for (UINT32 i = 0; i < formatList->numFormats; ++i)
 	{
-		printf("not support format\n");
+		const CLIPRDR_FORMAT* format = &formatList->formats[i];
+		const char* name = format->formatName;
+		if (name && !strcmp(name, "PNG"))
+		{
+			printf("Remote clipboard supports PNG format, remote formatId=%" PRIu32 "\n",
+			       format->formatId);
+			requestRemoteFormat(format->formatId, name);
+			return CHANNEL_RC_OK;
+		}
 	}
 
+	if (g_client.clipboard_format_from_remote_.contains(CF_DIBV5))
+	{
+		printf("Remote clipboard supports CF_DIBV5 format\n");
+		requestRemoteFormat(CF_DIBV5, nullptr);
+		return CHANNEL_RC_OK;
+	}
+
+	if (g_client.clipboard_format_from_remote_.contains(CF_DIB))
+	{
+		printf("Remote clipboard supports CF_DIB format\n");
+		requestRemoteFormat(CF_DIB, nullptr);
+		return CHANNEL_RC_OK;
+	}
+
+	printf("not support format\n");
 	return CHANNEL_RC_OK;
 }
 
@@ -223,14 +260,18 @@ UINT qf_CliprdrServerFormatDataResponseCallBack(
 
 	if (formatDataResponse->common.msgFlags != CB_RESPONSE_OK)
 	{
-		printf("Failed to set clipboard data request ready event\n");
-		return ERROR_INTERNAL_ERROR;
+		printf("Remote clipboard data request failed, formatId=%" PRIu32 ", name=%s\n",
+		       g_client.requested_remote_format_id_, g_client.requested_remote_format_name.c_str());
+		return CHANNEL_RC_OK;
 	}
 
 	QByteArray clipboardData(reinterpret_cast<const char*>(formatDataResponse->requestedFormatData),
 	                         static_cast<qsizetype>(formatDataResponse->common.dataLen));
-	QMetaObject::invokeMethod(g_rdpViewItem, [clipboardData]() {
-		g_rdpViewItem->updateClipboardDataFromRemote(clipboardData);
+	const UINT32 requestedFormatId = g_client.requested_remote_format_id_;
+	const QString requestedFormatName = QString::fromStdString(g_client.requested_remote_format_name);
+	QMetaObject::invokeMethod(g_rdpViewItem, [clipboardData, requestedFormatId, requestedFormatName]() {
+		g_rdpViewItem->updateClipboardDataFromRemote(clipboardData, requestedFormatId,
+		                                             requestedFormatName);
 	}, Qt::QueuedConnection);
 
 	printf("Clipboard data response received, dataLen=%" PRIu32 "\n",
@@ -247,6 +288,106 @@ UINT qf_CliprdrServerFormatListResponseCallBack(
 UINT qf_CliprdrServerFormatDataRequestCallBack(CliprdrClientContext* context,
                                                const CLIPRDR_FORMAT_DATA_REQUEST* formatDataRequest)
 {
+	if (!context || !formatDataRequest)
+	{
+		printf("Invalid clipboard data request\n");
+		return ERROR_INVALID_PARAMETER;
+	}
+
+	const QMimeData* mimeData = QGuiApplication::clipboard()->mimeData();
+	if (!mimeData)
+	{
+		printf("No clipboard data available\n");
+		return CHANNEL_RC_OK;
+	}
+
+	printf("Server requested clipboard formatId=%" PRIu32 "\n",
+	       formatDataRequest->requestedFormatId);
+
+	auto RemoteFormatDataResponse = [&](const BYTE* rawData, UINT32 dataLen) {
+		CLIPRDR_FORMAT_DATA_RESPONSE req = WINPR_C_ARRAY_INIT;
+		req.common.msgFlags = CB_RESPONSE_OK;
+		req.common.dataLen = dataLen;
+		req.requestedFormatData = rawData;
+
+		context->ClientFormatDataResponse(context, &req);
+		printf("From server data request, formatId=%" PRIu32 ", dataLen=%" PRIu32 "\n",
+		       formatDataRequest->requestedFormatId, dataLen);
+	};
+
+	auto RemoteFormatDataFail = [&]() {
+		CLIPRDR_FORMAT_DATA_RESPONSE req = WINPR_C_ARRAY_INIT;
+		req.common.msgFlags = CB_RESPONSE_FAIL;
+		req.common.dataLen = 0;
+		req.requestedFormatData = nullptr;
+
+		context->ClientFormatDataResponse(context, &req);
+		printf("Unsupported server clipboard format request, formatId=%" PRIu32 "\n",
+		       formatDataRequest->requestedFormatId);
+	};
+
+	if (mimeData->hasText() && formatDataRequest->requestedFormatId == CF_UNICODETEXT)
+	{
+		const char16_t* rawData = reinterpret_cast<const char16_t*>(mimeData->text().utf16());
+		UINT32 dataLen = (std::char_traits<char16_t>::length(rawData) + 1) * sizeof(char16_t); // 16bit char
+		RemoteFormatDataResponse(reinterpret_cast<const BYTE*>(rawData), dataLen);
+
+		printf("From server data request, formatId=%" PRIu32 ", senting clipboard data: %s\n",
+			formatDataRequest->requestedFormatId, mimeData->text().toUtf8().constData());
+	}
+	else if (mimeData->hasImage() && formatDataRequest->requestedFormatId == CF_DIB)
+	{
+		auto image = qvariant_cast<QImage>(mimeData->imageData());
+		if (image.isNull())
+		{
+			printf("No clipboard image available\n");
+			return CHANNEL_RC_OK;
+		}
+
+		QByteArray bmp;
+		QBuffer buffer(&bmp);
+		buffer.open(QIODevice::WriteOnly);
+		if (!image.save(&buffer, "BMP"))
+		{
+			printf("Failed to encode clipboard image as DIB\n");
+			return CHANNEL_RC_OK;
+		}
+
+		QByteArray dib = bmp.mid(14);	// skip 14 bytes of BMP header
+
+		RemoteFormatDataResponse(reinterpret_cast<const BYTE*>(dib.constData()),
+		                         static_cast<UINT32>(dib.size()));
+		printf("From server data request, formatId=%" PRIu32 ", sent DIB image bytes=%lld\n",
+		       formatDataRequest->requestedFormatId, static_cast<long long>(dib.size()));
+	}
+	else if (mimeData->hasImage() && formatDataRequest->requestedFormatId == qf::CLIPBOARD_FORMAT_PNG)
+	{
+		auto image = qvariant_cast<QImage>(mimeData->imageData());
+		if (image.isNull())
+		{
+			printf("No clipboard image available\n");
+			return CHANNEL_RC_OK;
+		}
+
+		QByteArray pngData;
+		QBuffer buffer(&pngData);
+		buffer.open(QIODevice::WriteOnly);
+		if (!image.save(&buffer, "PNG"))
+		{
+			printf("Failed to encode clipboard image as PNG\n");
+			return CHANNEL_RC_OK;
+		}
+
+		RemoteFormatDataResponse(reinterpret_cast<const BYTE*>(pngData.constData()),
+		                         static_cast<UINT32>(pngData.size()));
+		printf("From server data request, formatId=%" PRIu32 ", sent PNG image bytes=%lld\n",
+		       formatDataRequest->requestedFormatId, static_cast<long long>(pngData.size()));
+	}
+	else
+	{
+		RemoteFormatDataFail();
+	}
+
 	return CHANNEL_RC_OK;
 }
 UINT qf_CliprdrMonitorReadyCallback(CliprdrClientContext* context, const CLIPRDR_MONITOR_READY* monitorReady)
