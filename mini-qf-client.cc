@@ -2,15 +2,18 @@
 #include "freerdp/event.h"
 #include "freerdp/gdi/gdi.h"
 #include "freerdp/settings_keys.h"
+#include <cwchar>
 #include <freerdp/freerdp.h>
 #include <freerdp/log.h>
 #include <freerdp/settings.h>
 #include <freerdp/update.h>
+#include <algorithm>
 #include <memory>
 #include <qevent.h>
 #include <qguiapplication.h>
 #include <winpr/crt.h>
 #include <winpr/synch.h>
+#include <winpr/file.h>
 #include <unistd.h>
 #include <cstdio>
 #include <thread>
@@ -39,31 +42,19 @@
 extern "C" BOOL VCAPITYPE cliprdr_VirtualChannelEntryEx(PCHANNEL_ENTRY_POINTS_EX pEntryPoints,
                                                         PVOID pInitHandle);
 
-struct client_t
-{
-	uint32_t view_width_ = 1024;
-	uint32_t view_height_ = 768;
-
-	uint32_t requested_remote_format_id_ = 0;
-	std::string requested_remote_format_name;
-	std::map<uint32_t, std::string> clipboard_format_from_remote_;
-	std::atomic<bool> clipboard_data_request_ready_event_;
-};
-
 static std::atomic<bool> g_stopped = false;
 static RdpViewItem* g_rdpViewItem = nullptr;
 static std::unique_ptr<std::thread> g_freerdp_thread = nullptr;
-static client_t g_client = {};
+static std::shared_ptr<qf::client_t> g_client = {};
 static freerdp* g_instance = nullptr;
-static const QMimeData* g_mimeData = nullptr;
 static CliprdrClientContext* g_clipboard_client_context = nullptr;
 
 static RECTANGLE_16 scale_frame(rdpContext* context, const RECTANGLE_16* rect)
 {
 	uint32_t hw = freerdp_settings_get_uint32(context->settings, FreeRDP_DesktopWidth);
 	uint32_t hh = freerdp_settings_get_uint32(context->settings, FreeRDP_DesktopHeight);
-	uint32_t cw = g_client.view_width_;
-	uint32_t ch = g_client.view_height_;
+	uint32_t cw = g_client->view_width_;
+	uint32_t ch = g_client->view_height_;
 	RECTANGLE_16 rect16 = *rect; // copy rect to rect16
 
 	if (cw == 0)
@@ -184,18 +175,32 @@ static BOOL noop_keyboard_set_ime_status(rdpContext* context, UINT16 imeId, UINT
 	return TRUE;
 }
 
+static void qf_copy_file_descriptor_name(FILEDESCRIPTORW* descriptor, const QString& displayName)
+{
+	if (!descriptor)
+		return;
+
+	const qsizetype maxChars = static_cast<qsizetype>(ARRAYSIZE(descriptor->cFileName) - 1);
+	const QString clippedName = displayName.left(static_cast<int>(maxChars));
+	const ushort* utf16 = clippedName.utf16();
+
+	for (qsizetype i = 0; i < clippedName.size(); ++i)
+		descriptor->cFileName[i] = static_cast<WCHAR>(utf16[i]);
+	descriptor->cFileName[clippedName.size()] = 0;
+}
+
 
 UINT qf_CliprdrServerFormatListCallBack(CliprdrClientContext* context,
                                         const CLIPRDR_FORMAT_LIST* formatList)
 {
-	if (!g_client.clipboard_format_from_remote_.empty())
-		g_client.clipboard_format_from_remote_.clear();
+	if (!g_client->clipboard_format_from_remote_.empty())
+		g_client->clipboard_format_from_remote_.clear();
 
 	printf("cliprdr server format list: numFormats=%" PRIu32 "\n", formatList->numFormats);
 	for (UINT32 i = 0; i < formatList->numFormats; ++i)
 	{
 		const char* name = formatList->formats[i].formatName ? formatList->formats[i].formatName : "";
-		g_client.clipboard_format_from_remote_[formatList->formats[i].formatId] = name;
+		g_client->clipboard_format_from_remote_[formatList->formats[i].formatId] = name;
 		printf("  remote format[%" PRIu32 "]: id=%" PRIu32 ", name=%s\n", i,
 		       formatList->formats[i].formatId, name);
 	}
@@ -205,13 +210,13 @@ UINT qf_CliprdrServerFormatListCallBack(CliprdrClientContext* context,
 		CLIPRDR_FORMAT_DATA_REQUEST req = WINPR_C_ARRAY_INIT;
 		req.requestedFormatId = formatId;
 
-		g_client.requested_remote_format_id_ = formatId;
-		g_client.requested_remote_format_name = formatName ? formatName : "";
+		g_client->requested_remote_format_id_ = formatId;
+		g_client->requested_remote_format_name = formatName ? formatName : "";
 
 		context->ClientFormatDataRequest(context, &req);
 	};
 
-	if (g_client.clipboard_format_from_remote_.contains(CF_UNICODETEXT))
+	if (g_client->clipboard_format_from_remote_.contains(CF_UNICODETEXT))
 	{
 		printf("Remote clipboard supports CF_UNICODETEXT format\n");
 		requestRemoteFormat(CF_UNICODETEXT, nullptr);
@@ -231,14 +236,14 @@ UINT qf_CliprdrServerFormatListCallBack(CliprdrClientContext* context,
 		}
 	}
 
-	if (g_client.clipboard_format_from_remote_.contains(CF_DIBV5))
+	if (g_client->clipboard_format_from_remote_.contains(CF_DIBV5))
 	{
 		printf("Remote clipboard supports CF_DIBV5 format\n");
 		requestRemoteFormat(CF_DIBV5, nullptr);
 		return CHANNEL_RC_OK;
 	}
 
-	if (g_client.clipboard_format_from_remote_.contains(CF_DIB))
+	if (g_client->clipboard_format_from_remote_.contains(CF_DIB))
 	{
 		printf("Remote clipboard supports CF_DIB format\n");
 		requestRemoteFormat(CF_DIB, nullptr);
@@ -261,14 +266,14 @@ UINT qf_CliprdrServerFormatDataResponseCallBack(
 	if (formatDataResponse->common.msgFlags != CB_RESPONSE_OK)
 	{
 		printf("Remote clipboard data request failed, formatId=%" PRIu32 ", name=%s\n",
-		       g_client.requested_remote_format_id_, g_client.requested_remote_format_name.c_str());
+		       g_client->requested_remote_format_id_, g_client->requested_remote_format_name.c_str());
 		return CHANNEL_RC_OK;
 	}
 
 	QByteArray clipboardData(reinterpret_cast<const char*>(formatDataResponse->requestedFormatData),
 	                         static_cast<qsizetype>(formatDataResponse->common.dataLen));
-	const UINT32 requestedFormatId = g_client.requested_remote_format_id_;
-	const QString requestedFormatName = QString::fromStdString(g_client.requested_remote_format_name);
+	const UINT32 requestedFormatId = g_client->requested_remote_format_id_;
+	const QString requestedFormatName = QString::fromStdString(g_client->requested_remote_format_name);
 	QMetaObject::invokeMethod(g_rdpViewItem, [clipboardData, requestedFormatId, requestedFormatName]() {
 		g_rdpViewItem->updateClipboardDataFromRemote(clipboardData, requestedFormatId,
 		                                             requestedFormatName);
@@ -383,6 +388,53 @@ UINT qf_CliprdrServerFormatDataRequestCallBack(CliprdrClientContext* context,
 		printf("From server data request, formatId=%" PRIu32 ", sent PNG image bytes=%lld\n",
 		       formatDataRequest->requestedFormatId, static_cast<long long>(pngData.size()));
 	}
+	else if (mimeData->hasUrls() && formatDataRequest->requestedFormatId == qf::CLIPBOARD_FORMAT_FILE)
+	{
+		const size_t fileCount = g_client->clipboard_info_files_.size();
+		if (fileCount == 0)
+		{
+			printf("No local file list available for FileGroupDescriptorW request\n");
+			RemoteFormatDataFail();
+			return CHANNEL_RC_OK;
+		}
+
+		std::vector<FILEDESCRIPTORW> fds(fileCount);
+		for (size_t i = 0; i < fileCount; ++i)
+		{
+			const auto& file_info = g_client->clipboard_info_files_[i];
+			const UINT64 fileSize = file_info.is_directory_ ? 0 : file_info.total_;
+			fds[i].nFileSizeLow = static_cast<DWORD>(fileSize & 0xFFFFFFFFULL);
+			fds[i].nFileSizeHigh = static_cast<DWORD>((fileSize >> 32) & 0xFFFFFFFFULL);
+			fds[i].dwFlags = FD_FILESIZE | FD_ATTRIBUTES;
+			fds[i].dwFileAttributes = file_info.is_directory_ ? FILE_ATTRIBUTE_DIRECTORY : FILE_ATTRIBUTE_NORMAL;
+			qf_copy_file_descriptor_name(&fds[i], file_info.display_name_);
+		}
+
+		UINT32 flags = CB_STREAM_FILECLIP_ENABLED;
+		if (g_client->cliprdr_file_context_)
+		{
+			const UINT32 remoteFlags = cliprdr_file_context_remote_get_flags(g_client->cliprdr_file_context_);
+			if (remoteFlags & CB_STREAM_FILECLIP_ENABLED)
+				flags = remoteFlags;
+		}
+
+		BYTE* serialize_data = nullptr;
+		UINT32 serialize_data_size = 0;
+		const UINT error = cliprdr_serialize_file_list_ex(flags, fds.data(), static_cast<UINT32>(fileCount),
+		                                                  &serialize_data, &serialize_data_size);
+		if (error || !serialize_data || serialize_data_size == 0)
+		{
+			printf("Failed to serialize file list, error=%" PRIu32 "\n", error);
+			free(serialize_data);
+			RemoteFormatDataFail();
+			return CHANNEL_RC_OK;
+		}
+
+		RemoteFormatDataResponse(serialize_data, serialize_data_size);
+		printf("Sent FileGroupDescriptorW for %zu local file(s), bytes=%" PRIu32 "\n", fileCount,
+		       serialize_data_size);
+		free(serialize_data);
+	}
 	else
 	{
 		RemoteFormatDataFail();
@@ -392,8 +444,7 @@ UINT qf_CliprdrServerFormatDataRequestCallBack(CliprdrClientContext* context,
 }
 UINT qf_CliprdrMonitorReadyCallback(CliprdrClientContext* context, const CLIPRDR_MONITOR_READY* monitorReady)
 {
-    g_clipboard_client_context = context;
-    g_rdpViewItem->set_clipboard_client_context(g_clipboard_client_context);
+    g_client->cliprdr_client_context_ = context;
     printf("cliprdr monitor ready\n");
 
 	CLIPRDR_CAPABILITIES capabilities = WINPR_C_ARRAY_INIT;
@@ -403,7 +454,7 @@ UINT qf_CliprdrMonitorReadyCallback(CliprdrClientContext* context, const CLIPRDR
 	generalCapabilitySet.capabilitySetType = CB_CAPSTYPE_GENERAL;
 	generalCapabilitySet.capabilitySetLength = 12;
 	generalCapabilitySet.version = CB_CAPS_VERSION_2;
-	generalCapabilitySet.generalFlags = CB_USE_LONG_FORMAT_NAMES;
+	generalCapabilitySet.generalFlags = CB_USE_LONG_FORMAT_NAMES | CB_STREAM_FILECLIP_ENABLED | CB_FILECLIP_NO_FILE_PATHS;
 
 	UINT rc = context->ClientCapabilities(context, &capabilities);
 	if (rc != CHANNEL_RC_OK)
@@ -422,6 +473,21 @@ void qt_clipboard_channel_init(CliprdrClientContext* clipboard)
 		return;
 	}
 
+	g_client->clipboard_system_ = ClipboardCreate();
+	if (!g_client->clipboard_system_)
+	{
+		printf("clipboard system init failed\n");
+		return;
+	}
+
+	if (!g_client->cliprdr_file_context_)
+		g_client->cliprdr_file_context_ = cliprdr_file_context_new(g_client.get());
+	if (!g_client->cliprdr_file_context_)
+	{
+		printf("cliprdr file context alloc failed\n");
+		return;
+	}
+
     clipboard->MonitorReady = qf_CliprdrMonitorReadyCallback;
 
 	clipboard->ServerFormatList = qf_CliprdrServerFormatListCallBack;
@@ -429,6 +495,12 @@ void qt_clipboard_channel_init(CliprdrClientContext* clipboard)
 
     clipboard->ServerFormatDataRequest = qf_CliprdrServerFormatDataRequestCallBack;
     clipboard->ServerFormatDataResponse = qf_CliprdrServerFormatDataResponseCallBack;
+
+	if(!cliprdr_file_context_init(g_client->cliprdr_file_context_, clipboard))
+	{
+		printf("cliprdr file context init failed\n");
+		return;
+	}
 }
 
 void qf_channel_connected_callback(void* context, const ChannelConnectedEventArgs* event)
@@ -552,8 +624,8 @@ static BOOL my_pre_connect(freerdp* instance)
 	freerdp_settings_set_string(settings, FreeRDP_Password, "rootroot1.");
 
 	// 虚拟分辨率（即使无头也需要告诉服务端你请求的分辨率）
-	freerdp_settings_set_uint32(settings, FreeRDP_DesktopWidth, g_client.view_width_);
-	freerdp_settings_set_uint32(settings, FreeRDP_DesktopHeight, g_client.view_height_);
+	freerdp_settings_set_uint32(settings, FreeRDP_DesktopWidth, g_client->view_width_);
+	freerdp_settings_set_uint32(settings, FreeRDP_DesktopHeight, g_client->view_height_);
 	freerdp_settings_set_uint32(settings, FreeRDP_ColorDepth, 32);
 
 	// 跳过证书强校验（测试自签名证书时非常实用）
@@ -742,6 +814,9 @@ int main(int argc, char* argv[])
 		stop();
 		return -1;
 	}
+
+	g_client = std::make_shared<qf::client_t>();
+	g_rdpViewItem->set_qfclient_context(g_client);
 
 	g_freerdp_thread = std::make_unique<std::thread>(rdp_loop_thread, argc, argv);
 

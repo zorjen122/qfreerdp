@@ -13,6 +13,7 @@
 #include <QMimeData>
 #include <QByteArray>
 #include <QtEndian>
+#include <QFileInfo>
 #include <winpr/user.h>
 
 #include "freerdp/freerdp.h"
@@ -40,12 +41,8 @@ public:
         m_rdpContext = context;
     }
 
-    void set_clipboard_client_context(CliprdrClientContext* clipboard_client_context) {
-        m_clipboardClientContext = clipboard_client_context;
-    }
-
-    void set_clipboard_data_memory(const std::shared_ptr<char[]>& data) {
-        m_clipboard_ready_data_ = data;
+    void set_qfclient_context(std::shared_ptr<qf::client_t> context) {
+        m_qfClientContext = context;
     }
 
     void paint(QPainter* painter) override {
@@ -230,7 +227,7 @@ public:
 
     void updateClipboardDataFromRemote(const QByteArray& data, uint32_t formatId,
                                        const QString& formatName) {
-        if (!m_clipboardClientContext)
+        if (!m_qfClientContext || !m_qfClientContext->cliprdr_client_context_)
         {
             printf("No clipboard client context\n");
             return;
@@ -276,7 +273,14 @@ public:
 
     // plugin for clipboard
     void dataChangedCallback() {
-        if(!m_clipboardClientContext)
+        if (!m_qfClientContext)
+        {
+            printf("No qfreerdp client context\n");
+            return;
+        }
+
+        auto& clipboardContext = m_qfClientContext->cliprdr_client_context_;
+        if(!clipboardContext)
         {
             printf("No clipboard client context\n");
             return;
@@ -288,7 +292,7 @@ public:
             return;
         }
 
-        auto RemoteClipboardFormatList = [this](uint32_t formatId, const char* formatName) {
+        auto RemoteClipboardFormatList = [&, this](uint32_t formatId, const char* formatName) {
 
             CLIPRDR_FORMAT_LIST format_list = {};
 
@@ -299,7 +303,7 @@ public:
             format_list.numFormats = 1;
             format_list.formats = &format; // Clipboard data is in Unicode format
 
-            m_clipboardClientContext->ClientFormatList(m_clipboardClientContext, &format_list);
+            clipboardContext->ClientFormatList(clipboardContext, &format_list);
             printf("Clipboard local format list, format: %d, name: %s\n", formatId,
                    formatName ? formatName : "");
 
@@ -308,10 +312,52 @@ public:
         QClipboard* clipboard = QGuiApplication::clipboard();
         const QMimeData* mimeData = clipboard->mimeData();
 
-        if (mimeData->hasText()) {
+        if (mimeData->hasUrls())
+        {
+            QByteArray uriList;
+            m_qfClientContext->clipboard_info_files_.clear(); // Clear previous clipboard info files
+            for (const QUrl& url : mimeData->urls())
+            {
+                if (url.isLocalFile())
+                {
+                    QFileInfo file(url.toLocalFile());
+                    qf::clipboard_info_file_t clipboard_file_info;
+                    clipboard_file_info.display_name_ = file.fileName();
+                    clipboard_file_info.local_path_ = file.absoluteFilePath();
+                    clipboard_file_info.total_ = file.size();
+                    clipboard_file_info.is_directory_ = file.isDir(); // Check if it's a directory
+
+                    m_qfClientContext->clipboard_info_files_.push_back(clipboard_file_info);
+                    uriList.append(url.toEncoded());
+                    uriList.append('\n');
+                }
+            }
+
+            if (m_qfClientContext->clipboard_info_files_.empty())
+            {
+                printf("No local clipboard info files\n");
+                return;
+            }
+
+            if (m_qfClientContext->cliprdr_file_context_)
+            {
+                cliprdr_file_context_set_locally_available(m_qfClientContext->cliprdr_file_context_, TRUE);
+                cliprdr_file_context_update_client_data(m_qfClientContext->cliprdr_file_context_,
+                                                        uriList.constData(),
+                                                        static_cast<size_t>(uriList.size()));
+            }
+
+            RemoteClipboardFormatList(qf::CLIPBOARD_FORMAT_FILE, qf::CLIPBOARD_FORMAT_FILE_NAME);
+            printf("Updated clipboard with local file info\n");
+        }
+        else if (mimeData->hasText()) {
+            if (m_qfClientContext->cliprdr_file_context_)
+                cliprdr_file_context_set_locally_available(m_qfClientContext->cliprdr_file_context_, FALSE);
             RemoteClipboardFormatList(CF_UNICODETEXT, nullptr);
         }
         else if (mimeData->hasImage()) {
+            if (m_qfClientContext->cliprdr_file_context_)
+                cliprdr_file_context_set_locally_available(m_qfClientContext->cliprdr_file_context_, FALSE);
             
             CLIPRDR_FORMAT_LIST format_list = {};
 
@@ -324,13 +370,13 @@ public:
             format_list.numFormats = 2;
             format_list.formats = formats; // Clipboard data is in Unicode format
 
-            m_clipboardClientContext->ClientFormatList(m_clipboardClientContext, &format_list);
+            clipboardContext->ClientFormatList(clipboardContext, &format_list);
             
             printf("Clipboard local format list, format: %d, name: %s\n", formats[0].formatId,
                   formats[0].formatName ? formats[0].formatName : "");
             printf("Clipboard local format list, format: %d, name: %s\n", formats[1].formatId,
                   formats[1].formatName ? formats[1].formatName : "");
-        }
+        } 
     }
 
 signals:
@@ -340,7 +386,6 @@ private:
     QImage m_frame;
     QMutex m_mutex; // Mutex for thread-safe access to m_frame
     rdpContext* m_rdpContext;
-    CliprdrClientContext* m_clipboardClientContext; // Clipboard client context for clipboard operations
+    std::shared_ptr<qf::client_t> m_qfClientContext; // Clipboard client context for clipboard operations
     bool m_clipboardDataFromRemote = false;
-    std::shared_ptr<char[]> m_clipboard_ready_data_; // Clipboard data memory
 };

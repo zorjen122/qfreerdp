@@ -1,7 +1,14 @@
 #pragma once
 
 #include <QKeyEvent>
+#include <QString>
+#include <cstdint>
 #include <freerdp/input.h>
+#include <freerdp/client/cliprdr.h>
+#include <freerdp/client/client_cliprdr_file.h>
+#include <map>
+#include <string>
+#include <vector>
 
 namespace qf {
 
@@ -127,5 +134,35 @@ inline UINT to_freerdp_key_code(const QKeyEvent* event)
     }
 }
 
+
+    struct clipboard_info_file_t
+    {
+        QString display_name_;
+        QString local_path_;
+
+        uint64_t total_;
+        bool is_directory_;
+    };
+
+    struct client_t
+    {
+        uint32_t view_width_ = 1024;
+        uint32_t view_height_ = 768;
+
+        uint32_t requested_remote_format_id_ = 0;
+        std::string requested_remote_format_name;
+        std::map<uint32_t, std::string> clipboard_format_from_remote_;
+        CliprdrClientContext *cliprdr_client_context_ = nullptr;
+
+        wClipboard* clipboard_system_ = nullptr;
+        std::vector<clipboard_info_file_t> clipboard_info_files_;
+        CliprdrFileContext* cliprdr_file_context_ = nullptr;
+        
+    };
+
+
     static constexpr UINT32 CLIPBOARD_FORMAT_PNG = 0xC001;
+    static constexpr UINT32 CLIPBOARD_FORMAT_FILE = 0xD001;
+    static constexpr const char* CLIPBOARD_FORMAT_FILE_NAME = "FileGroupDescriptorW";    // by freerdp fix file format name
+
 }; // namespace qf
