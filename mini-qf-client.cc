@@ -464,6 +464,86 @@ UINT qf_CliprdrMonitorReadyCallback(CliprdrClientContext* context, const CLIPRDR
 	return context->ClientFormatList(context, &formatList);
 }
 
+UINT qf_ServerFileContentsRequest(CliprdrClientContext* context, 
+                                  const CLIPRDR_FILE_CONTENTS_REQUEST* request)
+{
+	if (request->listIndex >= g_client->clipboard_info_files_.size())	
+	{
+		printf("Invalid file list index\n");
+		return CB_RESPONSE_FAIL;
+	}
+
+	const auto& file_info = g_client->clipboard_info_files_[request->listIndex];
+	if (file_info.is_directory_)
+	{
+		printf("current is not support directory\n");
+		return CB_RESPONSE_FAIL;
+	}
+
+	auto sendFileContentResponse = [] (CliprdrClientContext* context, UINT32 streamId, const BYTE* data, UINT64 dataLen)
+	{
+		CLIPRDR_FILE_CONTENTS_RESPONSE response = WINPR_C_ARRAY_INIT;
+		response.common.msgFlags = CB_RESPONSE_OK;
+		response.streamId = streamId; // 0 for file contents request
+		response.cbRequested = dataLen;
+		response.requestedData = data;
+
+		context->ClientFileContentsResponse(context, &response);
+	};
+
+	if (request->dwFlags & FILECONTENTS_SIZE)
+	{
+		uint64_t *size_mem = (uint64_t*)malloc(sizeof(uint64_t));
+		*size_mem = file_info.total_;
+		sendFileContentResponse(context, request->streamId, (const BYTE*) size_mem, sizeof(uint64_t));
+		return CHANNEL_RC_OK;
+	}
+
+	if (request->dwFlags & FILECONTENTS_RANGE)
+	{
+		uint64_t offset = (uint64_t(request->nPositionHigh) << 32) | request->nPositionLow;
+
+		if (offset >= file_info.total_)
+		{
+			printf("offset is out of range\n");
+			return CB_RESPONSE_FAIL;
+		}
+
+		QFile file(file_info.local_path_);
+		if (!file.open(QIODevice::ReadOnly))
+		{
+			printf("Failed to open file: %s\n", file_info.local_path_.toUtf8().constData());
+			return CB_RESPONSE_FAIL;
+		}
+
+		if (!file.seek(offset))
+		{
+			printf("Failed to seek file: %s\n", file_info.local_path_.toUtf8().constData());
+			return CB_RESPONSE_FAIL;
+		}
+
+		const uint64_t remaining = file.size() - offset;
+		const uint64_t bytesToRead = std::min(remaining, uint64_t(request->cbRequested));
+
+		QByteArray data(bytesToRead, Qt::Uninitialized);
+		if (!file.read(data.data(), bytesToRead))
+		{
+			printf("Failed to read file: %s\n", file_info.local_path_.toUtf8().constData());
+			return CB_RESPONSE_FAIL;
+		}
+
+		char* data_mem = (char*)malloc(bytesToRead + 1); // copy data to heap
+		memset(data_mem, 0, bytesToRead + 1); // clear data in heap
+		memcpy(data_mem, data.constData(), bytesToRead);
+		sendFileContentResponse(context, request->streamId, (const BYTE*) data_mem, bytesToRead);
+
+		printf("Sent file contents for file: %s, bytes %ld\n", file_info.display_name_.toUtf8().constData(), bytesToRead);
+		return CHANNEL_RC_OK;
+	}
+
+	return CHANNEL_RC_OK;
+}
+
 
 void qt_clipboard_channel_init(CliprdrClientContext* clipboard)
 {
@@ -501,6 +581,8 @@ void qt_clipboard_channel_init(CliprdrClientContext* clipboard)
 		printf("cliprdr file context init failed\n");
 		return;
 	}
+
+	clipboard->ServerFileContentsRequest = qf_ServerFileContentsRequest;
 }
 
 void qf_channel_connected_callback(void* context, const ChannelConnectedEventArgs* event)
