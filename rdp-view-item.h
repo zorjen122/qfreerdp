@@ -21,6 +21,7 @@
 #include "freerdp/input.h"
 
 #include "qf_util.h"
+#include "qf_log.h"
 
 class RdpViewItem : public QQuickPaintedItem
 {
@@ -92,7 +93,8 @@ public:
 
         if (!freerdp_input_send_mouse_event(m_rdpContext->input, freerdp_mouse_event, map_x, map_y))
         {
-            printf("Failed to send mouse event\n");
+            qf::log::warn("input/mouse", "failed to send mouse event flags={} x={} y={}",
+                          freerdp_mouse_event, map_x, map_y);
         }
 
         #if 0
@@ -145,16 +147,16 @@ public:
             {
                 if(!freerdp_input_send_unicode_keyboard_event(m_rdpContext->input, flags, event->text().unicode()->unicode()))
                 {
-                    printf("Failed to send unicode keyboard event, %s\n", event->text().toUtf8().constData());
+                    qf::log::warn("input/key", "failed to send unicode text={}", event->text().toStdString());
                     return;
                 }
             }
-            printf("Unknown Qt key %d, text='%s'\n", event->key(), event->text().toUtf8().constData());
+            qf::log::debug("input/key", "unknown Qt key={} text='{}'", event->key(), event->text().toStdString());
             return;
         }
 
-        printf("Key %d %s, rdp_scancode=0x%04x\n", event->key(), down ? "down" : "up",
-               freerdp_key_code);
+        qf::log::debug("input/key", "qtKey={} state={} rdpScancode=0x{:04x}", event->key(),
+                       down ? "down" : "up", freerdp_key_code);
         freerdp_input_send_keyboard_event_ex(m_rdpContext->input, down,
                                              down && event->isAutoRepeat(), freerdp_key_code);
     }
@@ -229,7 +231,7 @@ public:
                                        const QString& formatName) {
         if (!m_qfClientContext || !m_qfClientContext->cliprdr_client_context_)
         {
-            printf("No clipboard client context\n");
+            qf::log::debug("clipboard/remote", "no clipboard client context");
             return;
         }
 
@@ -241,10 +243,10 @@ public:
             if (!image.isNull())
             {
                 QGuiApplication::clipboard()->setImage(image);
-                printf("Updated clipboard with remote image data\n");
+                qf::log::info("clipboard/remote", "updated local clipboard with remote PNG image");
             }
             else
-                printf("Failed to decode remote PNG data, size=%lld\n", static_cast<long long>(data.size()));
+                qf::log::warn("clipboard/remote", "failed to decode remote PNG bytes={}", data.size());
         }
         else if (formatId == CF_DIB || formatId == CF_DIBV5)
         {
@@ -252,10 +254,10 @@ public:
             if (!image.isNull())
             {
                 QGuiApplication::clipboard()->setImage(image);
-                printf("Updated clipboard with remote DIB image data\n");
+                qf::log::info("clipboard/remote", "updated local clipboard with remote DIB image");
             }
             else
-                printf("Failed to decode remote DIB data, size=%lld\n", static_cast<long long>(data.size()));
+                qf::log::warn("clipboard/remote", "failed to decode remote DIB bytes={}", data.size());
         }
         else if(formatId == CF_UNICODETEXT)
         {
@@ -266,7 +268,7 @@ public:
 
             QString text = QString::fromUtf16(textData, charCount);
             QGuiApplication::clipboard()->setText(text);
-            printf("Updated clipboard with remote text data: %s\n", text.toUtf8().constData());
+            qf::log::info("clipboard/remote", "updated local clipboard with remote text chars={}", text.size());
         }
         m_clipboardDataFromRemote = false;
     }
@@ -275,20 +277,20 @@ public:
     void dataChangedCallback() {
         if (!m_qfClientContext)
         {
-            printf("No qfreerdp client context\n");
+            qf::log::debug("clipboard/local", "no qfreerdp client context");
             return;
         }
 
         auto& clipboardContext = m_qfClientContext->cliprdr_client_context_;
         if(!clipboardContext)
         {
-            printf("No clipboard client context\n");
+            qf::log::debug("clipboard/remote", "no clipboard client context");
             return;
         }
 
         if (m_clipboardDataFromRemote)
         {
-            printf("Clipboard data from remote\n");
+            qf::log::debug("clipboard/local", "ignore dataChanged from remote update");
             return;
         }
 
@@ -304,8 +306,8 @@ public:
             format_list.formats = &format; // Clipboard data is in Unicode format
 
             clipboardContext->ClientFormatList(clipboardContext, &format_list);
-            printf("Clipboard local format list, format: %d, name: %s\n", formatId,
-                   formatName ? formatName : "");
+            qf::log::info("clipboard/local-format", "advertise formatId={} name={}", formatId,
+                          formatName ? formatName : "");
 
         };
 
@@ -335,7 +337,7 @@ public:
 
             if (m_qfClientContext->clipboard_info_files_.empty())
             {
-                printf("No local clipboard info files\n");
+                qf::log::warn("clipboard/local-file", "hasUrls but no local files were accepted");
                 return;
             }
 
@@ -348,7 +350,8 @@ public:
             }
 
             RemoteClipboardFormatList(qf::CLIPBOARD_FORMAT_FILE, qf::CLIPBOARD_FORMAT_FILE_NAME);
-            printf("Updated clipboard with local file info\n");
+            qf::log::info("clipboard/local-file", "captured local file list files={} uriBytes={}",
+                          m_qfClientContext->clipboard_info_files_.size(), uriList.size());
         }
         else if (mimeData->hasText()) {
             if (m_qfClientContext->cliprdr_file_context_)
@@ -372,10 +375,9 @@ public:
 
             clipboardContext->ClientFormatList(clipboardContext, &format_list);
             
-            printf("Clipboard local format list, format: %d, name: %s\n", formats[0].formatId,
-                  formats[0].formatName ? formats[0].formatName : "");
-            printf("Clipboard local format list, format: %d, name: %s\n", formats[1].formatId,
-                  formats[1].formatName ? formats[1].formatName : "");
+            qf::log::info("clipboard/local-format", "advertise image formats [{}/{}], [{}/{}]",
+                          formats[0].formatId, formats[0].formatName ? formats[0].formatName : "",
+                          formats[1].formatId, formats[1].formatName ? formats[1].formatName : "");
         } 
     }
 

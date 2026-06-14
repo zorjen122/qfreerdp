@@ -15,6 +15,7 @@ find_package(Qt6 REQUIRED COMPONENTS Core Gui Qml Quick)
 find_package(FreeRDP 3 REQUIRED)
 find_package(WinPR 3 REQUIRED)
 find_package(FreeRDP-Client 3 REQUIRED)
+find_package(spdlog REQUIRED)
 
 # 2. 定义可执行目标（使用 Qt 专属的包装函数）
 qt_add_executable(qf-client
@@ -43,6 +44,12 @@ target_include_directories(qf-client PRIVATE
     ${CLIPRDR_REF_DIR}
 )
 
+# Clang 21 trips over fmt's consteval format-string path with this distro fmt.
+# Keep brace-style formatting but let fmt validate at runtime.
+target_compile_definitions(qf-client PRIVATE
+    FMT_CONSTEVAL=
+)
+
 # 4. 链接 Qt 模块
 target_link_libraries(qf-client PRIVATE
     Qt6::Core
@@ -52,4 +59,5 @@ target_link_libraries(qf-client PRIVATE
     freerdp
     freerdp-client
     winpr
+    spdlog::spdlog
 )

@@ -35,6 +35,7 @@
 #include <freerdp/channels/channels.h>
 
 #include "qf_util.h"
+#include "qf_log.h"
 #include "rdp-view-item.h"
 
 #define TAG CLIENT_TAG("sample")
@@ -196,13 +197,13 @@ UINT qf_CliprdrServerFormatListCallBack(CliprdrClientContext* context,
 	if (!g_client->clipboard_format_from_remote_.empty())
 		g_client->clipboard_format_from_remote_.clear();
 
-	printf("cliprdr server format list: numFormats=%" PRIu32 "\n", formatList->numFormats);
+	qf::log::info("cliprdr/format-list", "server advertised {} format(s)", formatList->numFormats);
 	for (UINT32 i = 0; i < formatList->numFormats; ++i)
 	{
 		const char* name = formatList->formats[i].formatName ? formatList->formats[i].formatName : "";
 		g_client->clipboard_format_from_remote_[formatList->formats[i].formatId] = name;
-		printf("  remote format[%" PRIu32 "]: id=%" PRIu32 ", name=%s\n", i,
-		       formatList->formats[i].formatId, name);
+		qf::log::debug("cliprdr/format-list", "remote[{}] id={} name={}", i,
+		                formatList->formats[i].formatId, name);
 	}
 
 	auto requestRemoteFormat = [&](UINT32 formatId, const char* formatName)
@@ -218,7 +219,7 @@ UINT qf_CliprdrServerFormatListCallBack(CliprdrClientContext* context,
 
 	if (g_client->clipboard_format_from_remote_.contains(CF_UNICODETEXT))
 	{
-		printf("Remote clipboard supports CF_UNICODETEXT format\n");
+		qf::log::info("cliprdr/format-select", "request remote CF_UNICODETEXT");
 		requestRemoteFormat(CF_UNICODETEXT, nullptr);
 		return CHANNEL_RC_OK;
 	}
@@ -229,8 +230,7 @@ UINT qf_CliprdrServerFormatListCallBack(CliprdrClientContext* context,
 		const char* name = format->formatName;
 		if (name && !strcmp(name, "PNG"))
 		{
-			printf("Remote clipboard supports PNG format, remote formatId=%" PRIu32 "\n",
-			       format->formatId);
+			qf::log::info("cliprdr/format-select", "request remote PNG id={}", format->formatId);
 			requestRemoteFormat(format->formatId, name);
 			return CHANNEL_RC_OK;
 		}
@@ -238,19 +238,19 @@ UINT qf_CliprdrServerFormatListCallBack(CliprdrClientContext* context,
 
 	if (g_client->clipboard_format_from_remote_.contains(CF_DIBV5))
 	{
-		printf("Remote clipboard supports CF_DIBV5 format\n");
+		qf::log::info("cliprdr/format-select", "request remote CF_DIBV5");
 		requestRemoteFormat(CF_DIBV5, nullptr);
 		return CHANNEL_RC_OK;
 	}
 
 	if (g_client->clipboard_format_from_remote_.contains(CF_DIB))
 	{
-		printf("Remote clipboard supports CF_DIB format\n");
+		qf::log::info("cliprdr/format-select", "request remote CF_DIB");
 		requestRemoteFormat(CF_DIB, nullptr);
 		return CHANNEL_RC_OK;
 	}
 
-	printf("not support format\n");
+	qf::log::debug("cliprdr/format-select", "no supported remote clipboard format");
 	return CHANNEL_RC_OK;
 }
 
@@ -259,14 +259,14 @@ UINT qf_CliprdrServerFormatDataResponseCallBack(
 {
 	if (!context || !formatDataResponse)
 	{
-		printf("Invalid clipboard data response\n");
+		qf::log::warn("cliprdr/data-response", "invalid clipboard data response");
 		return ERROR_INVALID_PARAMETER;
 	}
 
 	if (formatDataResponse->common.msgFlags != CB_RESPONSE_OK)
 	{
-		printf("Remote clipboard data request failed, formatId=%" PRIu32 ", name=%s\n",
-		       g_client->requested_remote_format_id_, g_client->requested_remote_format_name.c_str());
+		qf::log::warn("cliprdr/data-response", "remote request failed formatId={} name={}",
+		             g_client->requested_remote_format_id_, g_client->requested_remote_format_name);
 		return CHANNEL_RC_OK;
 	}
 
@@ -279,8 +279,8 @@ UINT qf_CliprdrServerFormatDataResponseCallBack(
 		                                             requestedFormatName);
 	}, Qt::QueuedConnection);
 
-	printf("Clipboard data response received, dataLen=%" PRIu32 "\n",
-	       formatDataResponse->common.dataLen);
+	qf::log::debug("cliprdr/data-response", "received {} byte(s)",
+	               formatDataResponse->common.dataLen);
 	return CHANNEL_RC_OK;
 }
 
@@ -295,19 +295,19 @@ UINT qf_CliprdrServerFormatDataRequestCallBack(CliprdrClientContext* context,
 {
 	if (!context || !formatDataRequest)
 	{
-		printf("Invalid clipboard data request\n");
+		qf::log::warn("cliprdr/data-request", "invalid clipboard data request");
 		return ERROR_INVALID_PARAMETER;
 	}
 
 	const QMimeData* mimeData = QGuiApplication::clipboard()->mimeData();
 	if (!mimeData)
 	{
-		printf("No clipboard data available\n");
+		qf::log::warn("cliprdr/data-request", "no local clipboard data available");
 		return CHANNEL_RC_OK;
 	}
 
-	printf("Server requested clipboard formatId=%" PRIu32 "\n",
-	       formatDataRequest->requestedFormatId);
+	qf::log::info("cliprdr/data-request", "server requested formatId={}",
+	              formatDataRequest->requestedFormatId);
 
 	auto RemoteFormatDataResponse = [&](const BYTE* rawData, UINT32 dataLen) {
 		CLIPRDR_FORMAT_DATA_RESPONSE req = WINPR_C_ARRAY_INIT;
@@ -316,8 +316,8 @@ UINT qf_CliprdrServerFormatDataRequestCallBack(CliprdrClientContext* context,
 		req.requestedFormatData = rawData;
 
 		context->ClientFormatDataResponse(context, &req);
-		printf("From server data request, formatId=%" PRIu32 ", dataLen=%" PRIu32 "\n",
-		       formatDataRequest->requestedFormatId, dataLen);
+		qf::log::debug("cliprdr/data-request", "respond formatId={} bytes={}",
+		               formatDataRequest->requestedFormatId, dataLen);
 	};
 
 	auto RemoteFormatDataFail = [&]() {
@@ -327,8 +327,8 @@ UINT qf_CliprdrServerFormatDataRequestCallBack(CliprdrClientContext* context,
 		req.requestedFormatData = nullptr;
 
 		context->ClientFormatDataResponse(context, &req);
-		printf("Unsupported server clipboard format request, formatId=%" PRIu32 "\n",
-		       formatDataRequest->requestedFormatId);
+		qf::log::warn("cliprdr/data-request", "unsupported formatId={}",
+		             formatDataRequest->requestedFormatId);
 	};
 
 	if (mimeData->hasText() && formatDataRequest->requestedFormatId == CF_UNICODETEXT)
@@ -337,15 +337,15 @@ UINT qf_CliprdrServerFormatDataRequestCallBack(CliprdrClientContext* context,
 		UINT32 dataLen = (std::char_traits<char16_t>::length(rawData) + 1) * sizeof(char16_t); // 16bit char
 		RemoteFormatDataResponse(reinterpret_cast<const BYTE*>(rawData), dataLen);
 
-		printf("From server data request, formatId=%" PRIu32 ", senting clipboard data: %s\n",
-			formatDataRequest->requestedFormatId, mimeData->text().toUtf8().constData());
+		qf::log::debug("cliprdr/data-request", "sent text formatId={} chars={}",
+		               formatDataRequest->requestedFormatId, mimeData->text().size());
 	}
 	else if (mimeData->hasImage() && formatDataRequest->requestedFormatId == CF_DIB)
 	{
 		auto image = qvariant_cast<QImage>(mimeData->imageData());
 		if (image.isNull())
 		{
-			printf("No clipboard image available\n");
+			qf::log::warn("cliprdr/data-request", "no local clipboard image available");
 			return CHANNEL_RC_OK;
 		}
 
@@ -354,7 +354,7 @@ UINT qf_CliprdrServerFormatDataRequestCallBack(CliprdrClientContext* context,
 		buffer.open(QIODevice::WriteOnly);
 		if (!image.save(&buffer, "BMP"))
 		{
-			printf("Failed to encode clipboard image as DIB\n");
+			qf::log::warn("cliprdr/data-request", "failed to encode clipboard image as DIB");
 			return CHANNEL_RC_OK;
 		}
 
@@ -362,15 +362,15 @@ UINT qf_CliprdrServerFormatDataRequestCallBack(CliprdrClientContext* context,
 
 		RemoteFormatDataResponse(reinterpret_cast<const BYTE*>(dib.constData()),
 		                         static_cast<UINT32>(dib.size()));
-		printf("From server data request, formatId=%" PRIu32 ", sent DIB image bytes=%lld\n",
-		       formatDataRequest->requestedFormatId, static_cast<long long>(dib.size()));
+		qf::log::debug("cliprdr/data-request", "sent DIB formatId={} bytes={}",
+		               formatDataRequest->requestedFormatId, dib.size());
 	}
 	else if (mimeData->hasImage() && formatDataRequest->requestedFormatId == qf::CLIPBOARD_FORMAT_PNG)
 	{
 		auto image = qvariant_cast<QImage>(mimeData->imageData());
 		if (image.isNull())
 		{
-			printf("No clipboard image available\n");
+			qf::log::warn("cliprdr/data-request", "no local clipboard image available");
 			return CHANNEL_RC_OK;
 		}
 
@@ -379,21 +379,21 @@ UINT qf_CliprdrServerFormatDataRequestCallBack(CliprdrClientContext* context,
 		buffer.open(QIODevice::WriteOnly);
 		if (!image.save(&buffer, "PNG"))
 		{
-			printf("Failed to encode clipboard image as PNG\n");
+			qf::log::warn("cliprdr/data-request", "failed to encode clipboard image as PNG");
 			return CHANNEL_RC_OK;
 		}
 
 		RemoteFormatDataResponse(reinterpret_cast<const BYTE*>(pngData.constData()),
 		                         static_cast<UINT32>(pngData.size()));
-		printf("From server data request, formatId=%" PRIu32 ", sent PNG image bytes=%lld\n",
-		       formatDataRequest->requestedFormatId, static_cast<long long>(pngData.size()));
+		qf::log::debug("cliprdr/data-request", "sent PNG formatId={} bytes={}",
+		               formatDataRequest->requestedFormatId, pngData.size());
 	}
 	else if (mimeData->hasUrls() && formatDataRequest->requestedFormatId == qf::CLIPBOARD_FORMAT_FILE)
 	{
 		const size_t fileCount = g_client->clipboard_info_files_.size();
 		if (fileCount == 0)
 		{
-			printf("No local file list available for FileGroupDescriptorW request\n");
+			qf::log::warn("cliprdr/file-list", "no local file list for FileGroupDescriptorW request");
 			RemoteFormatDataFail();
 			return CHANNEL_RC_OK;
 		}
@@ -424,15 +424,15 @@ UINT qf_CliprdrServerFormatDataRequestCallBack(CliprdrClientContext* context,
 		                                                  &serialize_data, &serialize_data_size);
 		if (error || !serialize_data || serialize_data_size == 0)
 		{
-			printf("Failed to serialize file list, error=%" PRIu32 "\n", error);
+			qf::log::warn("cliprdr/file-list", "failed to serialize file list error={}", error);
 			free(serialize_data);
 			RemoteFormatDataFail();
 			return CHANNEL_RC_OK;
 		}
 
 		RemoteFormatDataResponse(serialize_data, serialize_data_size);
-		printf("Sent FileGroupDescriptorW for %zu local file(s), bytes=%" PRIu32 "\n", fileCount,
-		       serialize_data_size);
+		qf::log::info("cliprdr/file-list", "sent FileGroupDescriptorW files={} bytes={}", fileCount,
+		              serialize_data_size);
 		free(serialize_data);
 	}
 	else
@@ -445,7 +445,7 @@ UINT qf_CliprdrServerFormatDataRequestCallBack(CliprdrClientContext* context,
 UINT qf_CliprdrMonitorReadyCallback(CliprdrClientContext* context, const CLIPRDR_MONITOR_READY* monitorReady)
 {
     g_client->cliprdr_client_context_ = context;
-    printf("cliprdr monitor ready\n");
+    qf::log::info("cliprdr/monitor", "monitor ready");
 
 	CLIPRDR_CAPABILITIES capabilities = WINPR_C_ARRAY_INIT;
 	CLIPRDR_GENERAL_CAPABILITY_SET generalCapabilitySet = WINPR_C_ARRAY_INIT;
@@ -469,14 +469,14 @@ UINT qf_ServerFileContentsRequest(CliprdrClientContext* context,
 {
 	if (request->listIndex >= g_client->clipboard_info_files_.size())	
 	{
-		printf("Invalid file list index\n");
+		qf::log::warn("cliprdr/file-contents", "invalid listIndex={}", request->listIndex);
 		return CB_RESPONSE_FAIL;
 	}
 
 	const auto& file_info = g_client->clipboard_info_files_[request->listIndex];
 	if (file_info.is_directory_)
 	{
-		printf("current is not support directory\n");
+		qf::log::warn("cliprdr/file-contents", "directory paste is not supported name={}", file_info.display_name_.toStdString());
 		return CB_RESPONSE_FAIL;
 	}
 
@@ -505,20 +505,20 @@ UINT qf_ServerFileContentsRequest(CliprdrClientContext* context,
 
 		if (offset >= file_info.total_)
 		{
-			printf("offset is out of range\n");
+			qf::log::warn("cliprdr/file-contents", "offset out of range offset={} size={}", offset, file_info.total_);
 			return CB_RESPONSE_FAIL;
 		}
 
 		QFile file(file_info.local_path_);
 		if (!file.open(QIODevice::ReadOnly))
 		{
-			printf("Failed to open file: %s\n", file_info.local_path_.toUtf8().constData());
+			qf::log::warn("cliprdr/file-contents", "failed to open {}", file_info.local_path_.toStdString());
 			return CB_RESPONSE_FAIL;
 		}
 
 		if (!file.seek(offset))
 		{
-			printf("Failed to seek file: %s\n", file_info.local_path_.toUtf8().constData());
+			qf::log::warn("cliprdr/file-contents", "failed to seek {} offset={}", file_info.local_path_.toStdString(), offset);
 			return CB_RESPONSE_FAIL;
 		}
 
@@ -528,7 +528,7 @@ UINT qf_ServerFileContentsRequest(CliprdrClientContext* context,
 		QByteArray data(bytesToRead, Qt::Uninitialized);
 		if (!file.read(data.data(), bytesToRead))
 		{
-			printf("Failed to read file: %s\n", file_info.local_path_.toUtf8().constData());
+			qf::log::warn("cliprdr/file-contents", "failed to read {}", file_info.local_path_.toStdString());
 			return CB_RESPONSE_FAIL;
 		}
 
@@ -537,7 +537,8 @@ UINT qf_ServerFileContentsRequest(CliprdrClientContext* context,
 		memcpy(data_mem, data.constData(), bytesToRead);
 		sendFileContentResponse(context, request->streamId, (const BYTE*) data_mem, bytesToRead);
 
-		printf("Sent file contents for file: %s, bytes %ld\n", file_info.display_name_.toUtf8().constData(), bytesToRead);
+		qf::log::info("cliprdr/file-contents", "sent range name={} offset={} bytes={}",
+		             file_info.display_name_.toStdString(), offset, bytesToRead);
 		return CHANNEL_RC_OK;
 	}
 
@@ -549,14 +550,14 @@ void qt_clipboard_channel_init(CliprdrClientContext* clipboard)
 {
 	if (!clipboard)
 	{
-		printf("clipboard channel init failed, since cliboard context is NULL\n");
+		qf::log::error("cliprdr/init", "clipboard channel init failed: null context");
 		return;
 	}
 
 	g_client->clipboard_system_ = ClipboardCreate();
 	if (!g_client->clipboard_system_)
 	{
-		printf("clipboard system init failed\n");
+		qf::log::error("cliprdr/init", "WinPR clipboard system init failed");
 		return;
 	}
 
@@ -564,7 +565,7 @@ void qt_clipboard_channel_init(CliprdrClientContext* clipboard)
 		g_client->cliprdr_file_context_ = cliprdr_file_context_new(g_client.get());
 	if (!g_client->cliprdr_file_context_)
 	{
-		printf("cliprdr file context alloc failed\n");
+		qf::log::error("cliprdr/init", "file context allocation failed");
 		return;
 	}
 
@@ -578,7 +579,7 @@ void qt_clipboard_channel_init(CliprdrClientContext* clipboard)
 
 	if(!cliprdr_file_context_init(g_client->cliprdr_file_context_, clipboard))
 	{
-		printf("cliprdr file context init failed\n");
+		qf::log::error("cliprdr/init", "file context init failed");
 		return;
 	}
 
@@ -587,11 +588,11 @@ void qt_clipboard_channel_init(CliprdrClientContext* clipboard)
 
 void qf_channel_connected_callback(void* context, const ChannelConnectedEventArgs* event)
 {
-	printf("channel connected: %s, interface=%p\n", event->name, event->pInterface);
+	qf::log::info("channel/connect", "connected name={} interface={}", event->name, fmt::ptr(event->pInterface));
 
 	if (!strcmp(event->name, CLIPRDR_SVC_CHANNEL_NAME))
 	{
-		printf("Initializing clipboard channel...\n");
+		qf::log::info("cliprdr/init", "initializing clipboard channel");
 		qt_clipboard_channel_init(static_cast<CliprdrClientContext*>(event->pInterface));
 	}
 }
@@ -603,7 +604,7 @@ void qf_channel_disconnected_callback(void* context, const ChannelDisconnectedEv
 static void qf_print_static_channels(rdpSettings* settings)
 {
 	const UINT32 count = freerdp_settings_get_uint32(settings, FreeRDP_StaticChannelCount);
-	printf("StaticChannelCount=%" PRIu32 "\n", count);
+	qf::log::debug("channel/static", "count={}", count);
 
 	for (UINT32 i = 0; i < count; ++i)
 	{
@@ -611,7 +612,7 @@ static void qf_print_static_channels(rdpSettings* settings)
 		    freerdp_settings_get_pointer_array(settings, FreeRDP_StaticChannelArray, i));
 
 		if (args && (args->argc > 0))
-			printf("static channel[%" PRIu32 "]=%s\n", i, args->argv[0]);
+			qf::log::debug("channel/static", "channel[{}]={}", i, args->argv[0]);
 	}
 }
 
@@ -627,7 +628,7 @@ static BOOL qf_load_cliprdr_addin(freerdp* instance)
 	{
 		if (!freerdp_client_add_static_channel(settings, ARRAYSIZE(args), args))
 		{
-			printf("[ERROR] Failed to add cliprdr static channel.\n");
+			qf::log::error("cliprdr/load", "failed to add static channel");
 			return FALSE;
 		}
 	}
@@ -636,7 +637,7 @@ static BOOL qf_load_cliprdr_addin(freerdp* instance)
 	    settings, CLIPRDR_SVC_CHANNEL_NAME);
 	if (!cliprdrArgs)
 	{
-		printf("[ERROR] cliprdr static channel args were not found after add.\n");
+		qf::log::error("cliprdr/load", "static channel args missing after add");
 		return FALSE;
 	}
 
@@ -646,11 +647,11 @@ static BOOL qf_load_cliprdr_addin(freerdp* instance)
 	                                               cliprdr_VirtualChannelEntryEx, cliprdrArgs);
 	if (rc != CHANNEL_RC_OK)
 	{
-		printf("[ERROR] Failed to load cliprdr channel add-in, rc=%d.\n", rc);
+		qf::log::error("cliprdr/load", "failed to load channel add-in rc={}", rc);
 		return FALSE;
 	}
 
-	printf("[INFO] cliprdr channel add-in loaded.\n");
+	qf::log::info("cliprdr/load", "channel add-in loaded");
 	return TRUE;
 }
 
@@ -682,7 +683,7 @@ static BOOL my_load_channels(freerdp* instance)
 */
 	if (!qf_load_cliprdr_addin(instance))
 	{
-		printf("[ERROR] Failed to load clipboard channel add-in.\n");
+		qf::log::error("cliprdr/load", "failed to load clipboard channel add-in");
 		return FALSE;
 	}
 
@@ -694,7 +695,7 @@ static BOOL my_pre_connect(freerdp* instance)
 {
 	rdpSettings* settings = instance->context->settings;
 
-	printf("[INFO] Configuring connection settings...\n");
+	qf::log::info("rdp/pre-connect", "configuring connection settings");
 
 	// 【请根据实际情况修改以下参数】
 	// 目标主机的 IP 和端口
@@ -729,7 +730,7 @@ static BOOL my_pre_connect(freerdp* instance)
 	PubSub_SubscribeChannelDisconnected(instance->context->pubSub,
 	                                    qf_channel_disconnected_callback);
 
-	printf("[INFO] Pre-connect configurations set.\n");
+	qf::log::info("rdp/pre-connect", "configuration applied");
 	return TRUE;
 }
 
@@ -753,7 +754,7 @@ static BOOL my_post_connect(freerdp* instance)
 
 	if (!gdi_init(instance, PIXEL_FORMAT_BGRX32))
 	{
-		printf("gdi init format is failed");
+		qf::log::error("rdp/post-connect", "gdi_init failed");
 		return FALSE;
 	}
 
@@ -768,14 +769,14 @@ void rdp_loop_thread(int argc, char* argv[])
 	WINPR_UNUSED(argc);
 	WINPR_UNUSED(argv);
 
-	printf("--- Minimal FreeRDP 3.x Headless Client Test ---\n");
+	qf::log::info("rdp/session", "starting FreeRDP loop");
 
 	// 2. 创建并初始化一个 FreeRDP 实例
 	freerdp_register_addin_provider(freerdp_channels_load_static_addin_entry, 0);
 	g_instance = freerdp_new();
 	if (!g_instance)
 	{
-		fprintf(stderr, "[ERROR] Failed to allocate FreeRDP instance.\n");
+		qf::log::error("rdp/session", "failed to allocate FreeRDP instance");
 		return;
 	}
 
@@ -787,23 +788,22 @@ void rdp_loop_thread(int argc, char* argv[])
 	// 4. 创建 RDP 上下文，它会根据 instance 自动分配 settings 内存
 	if (!freerdp_context_new(g_instance))
 	{
-		fprintf(stderr, "[ERROR] Failed to allocate RDP context.\n");
+		qf::log::error("rdp/session", "failed to allocate RDP context");
 		goto fail;
 	}
 
 	// 5. 尝试连接
-	printf("[INFO] Attempting to connect...\n");
+	qf::log::info("rdp/connect", "attempting to connect");
 
 	// 如果 127.0.0.1:3389 没有开启的 RDP 服务，这里会很快报错并返回 FALSE。
 	// 如果你有实际的 RDP 服务器，可以在 my_pre_connect 函数中填入正确的 IP/账号。
 	if (!freerdp_connect(g_instance))
 	{
-		fprintf(stderr, "[ERROR] Connection failed (this is normal if no RDP server is running on "
-		                "target IP).\n");
+		qf::log::error("rdp/connect", "connection failed");
 	}
 	else
 	{
-		printf("[SUCCESS] Connected successfully!\n");
+		qf::log::info("rdp/connect", "connected successfully");
 
 		// 6. 主事件轮询，用来保持 TCP 链接畅通并接收协议数据
 		DWORD nCount = 0;
@@ -838,16 +838,16 @@ void rdp_loop_thread(int argc, char* argv[])
 
 		rc = freerdp_get_last_error(g_instance->context);
 
-		printf("[INFO] Disconnecting...\n");
+		qf::log::info("rdp/disconnect", "disconnecting");
 		freerdp_disconnect(g_instance);
 	}
 
 fail:
-	printf("--- Test finished ---\n");
+	qf::log::info("rdp/session", "test finished");
 	freerdp_context_free(g_instance);
 	freerdp_free(g_instance);
 
-	printf("[INFO] FreeRDP instance freed, rc = %d\n", rc);
+	qf::log::info("rdp/session", "FreeRDP instance freed rc={}", rc);
 }
 
 void stop()
@@ -862,6 +862,7 @@ void stop()
 
 int main(int argc, char* argv[])
 {
+	qf::log::init();
 	QGuiApplication app(argc, argv);
 	QQmlApplicationEngine engine;
 
