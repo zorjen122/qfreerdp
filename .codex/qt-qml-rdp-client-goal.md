@@ -14,8 +14,6 @@ Build a minimal RDP client that supports:
 - keyboard input
 - basic desktop resize handling only when needed later
 
-Explicitly out of scope for the first version:
-
 - sound
 - clipboard
 - dynamic window resize
@@ -24,3 +22,6 @@ Explicitly out of scope for the first version:
 - smart sizing
 - remote cursor shape
 - advanced keyboard layout and IME handling
+
+## References
+- [FreeRDP GitHub](https://github.com/FreeRDP/FreeRDP)

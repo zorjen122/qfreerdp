@@ -3,11 +3,19 @@
 #include "freerdp/gdi/gdi.h"
 #include "freerdp/settings_keys.h"
 #include <cwchar>
+#include <freerdp/addin.h>
+#include <freerdp/client/channels.h>
+#include <freerdp/client/cliprdr.h>
+#include <freerdp/client/cmdline.h>
+#include <freerdp/channels/cliprdr.h>
+#include <freerdp/channels/channels.h>
 #include <freerdp/freerdp.h>
 #include <freerdp/log.h>
 #include <freerdp/settings.h>
+#include <freerdp/types.h>
 #include <freerdp/update.h>
 #include <algorithm>
+#include <cstdlib>
 #include <memory>
 #include <qevent.h>
 #include <qguiapplication.h>
@@ -26,16 +34,9 @@
 #include <QMimeData>
 #include <map>
 
-#include "freerdp/types.h"
-#include "freerdp/channels/cliprdr.h"
-#include "freerdp/client/cliprdr.h"
-#include <freerdp/client/cmdline.h>
-#include <freerdp/addin.h>
-#include <freerdp/client/channels.h>
-#include <freerdp/channels/channels.h>
-
 #include "qf_util.h"
 #include "qf_log.h"
+#include "clipboard-entry.h"
 #include "rdp-view-item.h"
 
 #define TAG CLIENT_TAG("sample")
@@ -47,6 +48,7 @@ static std::atomic<bool> g_stopped = false;
 static RdpViewItem* g_rdpViewItem = nullptr;
 static std::unique_ptr<std::thread> g_freerdp_thread = nullptr;
 static std::shared_ptr<qf::client_t> g_client = {};
+static std::unique_ptr<qf::clipboard_entry> g_clipboard_entry = nullptr;
 static freerdp* g_instance = nullptr;
 static CliprdrClientContext* g_clipboard_client_context = nullptr;
 
@@ -234,6 +236,14 @@ UINT qf_CliprdrServerFormatListCallBack(CliprdrClientContext* context,
 			requestRemoteFormat(format->formatId, name);
 			return CHANNEL_RC_OK;
 		}
+
+		if (name && !strcmp(name, qf::CLIPBOARD_FORMAT_FILE_NAME))
+		{
+			qf::log::info("cliprdr/format-select", "request remote FileGroupDescriptorW id={}",
+			              format->formatId);
+			requestRemoteFormat(format->formatId, qf::CLIPBOARD_FORMAT_FILE_NAME);
+			return CHANNEL_RC_OK;
+		}
 	}
 
 	if (g_client->clipboard_format_from_remote_.contains(CF_DIBV5))
@@ -270,14 +280,58 @@ UINT qf_CliprdrServerFormatDataResponseCallBack(
 		return CHANNEL_RC_OK;
 	}
 
-	QByteArray clipboardData(reinterpret_cast<const char*>(formatDataResponse->requestedFormatData),
-	                         static_cast<qsizetype>(formatDataResponse->common.dataLen));
 	const UINT32 requestedFormatId = g_client->requested_remote_format_id_;
-	const QString requestedFormatName = QString::fromStdString(g_client->requested_remote_format_name);
-	QMetaObject::invokeMethod(g_rdpViewItem, [clipboardData, requestedFormatId, requestedFormatName]() {
-		g_rdpViewItem->updateClipboardDataFromRemote(clipboardData, requestedFormatId,
-		                                             requestedFormatName);
-	}, Qt::QueuedConnection);
+
+	if (g_client->requested_remote_format_name == qf::CLIPBOARD_FORMAT_FILE_NAME)
+	{
+		UINT32 fileCount = 0;
+		FILEDESCRIPTORW* fds = NULL;
+
+		UINT32 error = cliprdr_parse_file_list(formatDataResponse->requestedFormatData,
+		                                       formatDataResponse->common.dataLen,
+		                                       &fds, &fileCount);
+		if (error == CHANNEL_RC_OK)
+		{
+			std::vector<qf::clipboard_info_file_t> remoteFiles;
+			remoteFiles.reserve(fileCount);
+			for (UINT32 i = 0; i < fileCount; ++i)
+			{
+				FILEDESCRIPTORW* descriptor = &fds[i];
+				const QString displayName =
+				    QString::fromUtf16(reinterpret_cast<const char16_t*>(descriptor->cFileName));
+				const uint64_t fileTotal =
+				    (uint64_t(descriptor->nFileSizeHigh) << 32) | descriptor->nFileSizeLow;
+				const DWORD attribute = descriptor->dwFileAttributes;
+				const bool isDirectory = (attribute & FILE_ATTRIBUTE_DIRECTORY) != 0;
+
+				qf::clipboard_info_file_t fileInfo;
+				fileInfo.display_name_ = displayName;
+				fileInfo.local_path_ = displayName;
+				fileInfo.total_ = fileTotal;
+				fileInfo.is_directory_ = isDirectory;
+				remoteFiles.push_back(fileInfo);
+			}
+
+			if (g_clipboard_entry)
+				g_clipboard_entry->enqueue_remote_file_list(context, remoteFiles);
+		}
+		else
+		{
+			qf::log::warn("cliprdr/file-list", "failed to parse remote file list error={}", error);
+		}
+		free(fds);
+	}
+	else
+	{
+		QByteArray clipboardData(reinterpret_cast<const char*>(formatDataResponse->requestedFormatData),
+								static_cast<qsizetype>(formatDataResponse->common.dataLen));
+		const QString requestedFormatName = QString::fromStdString(g_client->requested_remote_format_name);
+		QMetaObject::invokeMethod(g_rdpViewItem, [clipboardData, requestedFormatId, requestedFormatName]() {
+			g_rdpViewItem->updateClipboardDataFromRemote(clipboardData, requestedFormatId,
+														requestedFormatName);
+		}, Qt::QueuedConnection);
+
+	}
 
 	qf::log::debug("cliprdr/data-response", "received {} byte(s)",
 	               formatDataResponse->common.dataLen);
@@ -465,87 +519,19 @@ UINT qf_CliprdrMonitorReadyCallback(CliprdrClientContext* context, const CLIPRDR
 }
 
 UINT qf_ServerFileContentsRequest(CliprdrClientContext* context, 
-                                  const CLIPRDR_FILE_CONTENTS_REQUEST* request)
+	                                  const CLIPRDR_FILE_CONTENTS_REQUEST* request)
 {
-	if (request->listIndex >= g_client->clipboard_info_files_.size())	
-	{
-		qf::log::warn("cliprdr/file-contents", "invalid listIndex={}", request->listIndex);
-		return CB_RESPONSE_FAIL;
-	}
+	if (!g_clipboard_entry)
+		return ERROR_INVALID_PARAMETER;
+	return g_clipboard_entry->server_file_contents_request(context, request);
+}
 
-	const auto& file_info = g_client->clipboard_info_files_[request->listIndex];
-
-	auto sendFileContentResponse = [] (CliprdrClientContext* context, UINT32 streamId, const BYTE* data, UINT64 dataLen)
-	{
-		CLIPRDR_FILE_CONTENTS_RESPONSE response = WINPR_C_ARRAY_INIT;
-		response.common.msgFlags = CB_RESPONSE_OK;
-		response.streamId = streamId; // 0 for file contents request
-		response.cbRequested = dataLen;
-		response.requestedData = data;
-
-		context->ClientFileContentsResponse(context, &response);
-	};
-
-	if (request->dwFlags & FILECONTENTS_SIZE)
-	{
-		uint64_t *size_mem = (uint64_t*)malloc(sizeof(uint64_t));
-		*size_mem = file_info.is_directory_ ? 0 : file_info.total_;
-		sendFileContentResponse(context, request->streamId, (const BYTE*) size_mem, sizeof(uint64_t));
-		return CHANNEL_RC_OK;
-	}
-
-	if (request->dwFlags & FILECONTENTS_RANGE)
-	{
-		if (file_info.is_directory_)
-		{
-			qf::log::warn("cliprdr/file-contents", "range requested for directory name={}",
-			              file_info.display_name_.toStdString());
-			return CB_RESPONSE_FAIL;
-		}
-
-		uint64_t offset = (uint64_t(request->nPositionHigh) << 32) | request->nPositionLow;
-
-		if (offset >= file_info.total_)
-		{
-			qf::log::warn("cliprdr/file-contents", "offset out of range offset={} size={}", offset, file_info.total_);
-			return CB_RESPONSE_FAIL;
-		}
-
-		QFile file(file_info.local_path_);
-		if (!file.open(QIODevice::ReadOnly))
-		{
-			qf::log::warn("cliprdr/file-contents", "failed to open {}", file_info.local_path_.toStdString());
-			return CB_RESPONSE_FAIL;
-		}
-
-		if (!file.seek(offset))
-		{
-			qf::log::warn("cliprdr/file-contents", "failed to seek {} offset={}", file_info.local_path_.toStdString(), offset);
-			return CB_RESPONSE_FAIL;
-		}
-
-		const uint64_t remaining = file.size() - offset;
-		const uint64_t bytesToRead = std::min(remaining, uint64_t(request->cbRequested));
-
-		QByteArray data(bytesToRead, Qt::Uninitialized);
-		const qint64 byteTransferred = file.read(data.data(), bytesToRead);
-		if (byteTransferred != bytesToRead)
-		{
-			qf::log::warn("cliprdr/file-contents", "failed to read {}", file_info.local_path_.toStdString());
-			return CB_RESPONSE_FAIL;
-		}
-
-		char* data_mem = (char*)malloc(bytesToRead + 1); // copy data to heap
-		memset(data_mem, 0, bytesToRead + 1); // clear data in heap
-		memcpy(data_mem, data.constData(), bytesToRead);
-		sendFileContentResponse(context, request->streamId, (const BYTE*) data_mem, bytesToRead);
-
-		qf::log::info("cliprdr/file-contents", "sent range name={} offset={} bytes={}",
-		             file_info.display_name_.toStdString(), offset, bytesToRead);
-		return CHANNEL_RC_OK;
-	}
-
-	return CHANNEL_RC_OK;
+UINT qf_ServerFileContentsResponse(CliprdrClientContext* context,
+                                   const CLIPRDR_FILE_CONTENTS_RESPONSE* response)
+{
+	if (!g_clipboard_entry)
+		return ERROR_INVALID_PARAMETER;
+	return g_clipboard_entry->server_file_contents_response(context, response);
 }
 
 
@@ -586,7 +572,10 @@ void qt_clipboard_channel_init(CliprdrClientContext* clipboard)
 		return;
 	}
 
+	if (!g_clipboard_entry)
+		g_clipboard_entry = std::make_unique<qf::clipboard_entry>(g_client);
 	clipboard->ServerFileContentsRequest = qf_ServerFileContentsRequest;
+	clipboard->ServerFileContentsResponse = qf_ServerFileContentsResponse;
 }
 
 void qf_channel_connected_callback(void* context, const ChannelConnectedEventArgs* event)
@@ -728,6 +717,7 @@ static BOOL my_pre_connect(freerdp* instance)
 	freerdp_settings_set_bool(settings, FreeRDP_DeviceRedirection, FALSE);
 
 	freerdp_settings_set_bool(settings, FreeRDP_RedirectClipboard, TRUE);
+	freerdp_settings_set_uint32(settings, FreeRDP_ClipboardFeatureMask, CLIPRDR_FLAG_DEFAULT_MASK);
 
 	PubSub_SubscribeChannelConnected(instance->context->pubSub, qf_channel_connected_callback);
 	PubSub_SubscribeChannelDisconnected(instance->context->pubSub,
