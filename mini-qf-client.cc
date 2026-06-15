@@ -474,11 +474,6 @@ UINT qf_ServerFileContentsRequest(CliprdrClientContext* context,
 	}
 
 	const auto& file_info = g_client->clipboard_info_files_[request->listIndex];
-	if (file_info.is_directory_)
-	{
-		qf::log::warn("cliprdr/file-contents", "directory paste is not supported name={}", file_info.display_name_.toStdString());
-		return CB_RESPONSE_FAIL;
-	}
 
 	auto sendFileContentResponse = [] (CliprdrClientContext* context, UINT32 streamId, const BYTE* data, UINT64 dataLen)
 	{
@@ -494,13 +489,20 @@ UINT qf_ServerFileContentsRequest(CliprdrClientContext* context,
 	if (request->dwFlags & FILECONTENTS_SIZE)
 	{
 		uint64_t *size_mem = (uint64_t*)malloc(sizeof(uint64_t));
-		*size_mem = file_info.total_;
+		*size_mem = file_info.is_directory_ ? 0 : file_info.total_;
 		sendFileContentResponse(context, request->streamId, (const BYTE*) size_mem, sizeof(uint64_t));
 		return CHANNEL_RC_OK;
 	}
 
 	if (request->dwFlags & FILECONTENTS_RANGE)
 	{
+		if (file_info.is_directory_)
+		{
+			qf::log::warn("cliprdr/file-contents", "range requested for directory name={}",
+			              file_info.display_name_.toStdString());
+			return CB_RESPONSE_FAIL;
+		}
+
 		uint64_t offset = (uint64_t(request->nPositionHigh) << 32) | request->nPositionLow;
 
 		if (offset >= file_info.total_)
@@ -526,7 +528,8 @@ UINT qf_ServerFileContentsRequest(CliprdrClientContext* context,
 		const uint64_t bytesToRead = std::min(remaining, uint64_t(request->cbRequested));
 
 		QByteArray data(bytesToRead, Qt::Uninitialized);
-		if (!file.read(data.data(), bytesToRead))
+		const qint64 byteTransferred = file.read(data.data(), bytesToRead);
+		if (byteTransferred != bytesToRead)
 		{
 			qf::log::warn("cliprdr/file-contents", "failed to read {}", file_info.local_path_.toStdString());
 			return CB_RESPONSE_FAIL;

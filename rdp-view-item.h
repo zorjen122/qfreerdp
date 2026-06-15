@@ -14,7 +14,10 @@
 #include <QByteArray>
 #include <QtEndian>
 #include <QFileInfo>
+#include <QDir>
 #include <winpr/user.h>
+
+#include <algorithm>
 
 #include "freerdp/freerdp.h"
 #include "freerdp/client/cliprdr.h"
@@ -273,6 +276,44 @@ public:
         m_clipboardDataFromRemote = false;
     }
 
+    QString clipboardDisplayName(const QFileInfo& root, const QFileInfo& fileInfo) const
+    {
+        QString displayName = root.fileName();
+        if (root.absoluteFilePath() != fileInfo.absoluteFilePath())
+        {
+            QDir rootDir(root.absoluteFilePath());
+            displayName += "/" + rootDir.relativeFilePath(fileInfo.absoluteFilePath());
+        }
+        displayName.replace("/", "\\");
+        return displayName;
+    }
+
+    void appendClipboardInfoFile(const QFileInfo& root, const QFileInfo& fileInfo)
+    {
+        qf::clipboard_info_file_t clipboard_file_info;
+        clipboard_file_info.display_name_ = clipboardDisplayName(root, fileInfo);
+        clipboard_file_info.local_path_ = fileInfo.absoluteFilePath();
+        clipboard_file_info.total_ = fileInfo.size();
+        clipboard_file_info.is_directory_ = fileInfo.isDir();
+
+        auto iter = std::find_if(m_qfClientContext->clipboard_info_files_.begin(), 
+                    m_qfClientContext->clipboard_info_files_.end(),
+                    [&](const qf::clipboard_info_file_t& file) {
+                        return file.local_path_ == fileInfo.absoluteFilePath();
+                    });
+
+        bool contained = iter == m_qfClientContext->clipboard_info_files_.end();
+        if (contained)
+            m_qfClientContext->clipboard_info_files_.push_back(clipboard_file_info);
+
+        if (!fileInfo.isDir())
+            return;
+
+        QDir dir(fileInfo.absoluteFilePath());
+        for (const QString& file : dir.entryList(QDir::Files | QDir::Dirs | QDir::NoDotAndDotDot))
+            appendClipboardInfoFile(root, QFileInfo(dir.filePath(file)));
+    }
+
     // plugin for clipboard
     void dataChangedCallback() {
         if (!m_qfClientContext)
@@ -323,13 +364,15 @@ public:
                 if (url.isLocalFile())
                 {
                     QFileInfo file(url.toLocalFile());
-                    qf::clipboard_info_file_t clipboard_file_info;
-                    clipboard_file_info.display_name_ = file.fileName();
-                    clipboard_file_info.local_path_ = file.absoluteFilePath();
-                    clipboard_file_info.total_ = file.size();
-                    clipboard_file_info.is_directory_ = file.isDir(); // Check if it's a directory
 
-                    m_qfClientContext->clipboard_info_files_.push_back(clipboard_file_info);
+                    if (!file.isDir() && !file.isFile())
+                    {
+                        qf::log::warn("clipboard/local-file", 
+                            "file type is not supported: {}", file.suffix().toStdString());
+                        continue;
+                    }
+
+                    appendClipboardInfoFile(file, file);
                     uriList.append(url.toEncoded());
                     uriList.append('\n');
                 }
