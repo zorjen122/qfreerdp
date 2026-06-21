@@ -893,6 +893,7 @@ int main(int argc, char* argv[])
 
 	g_client = std::make_shared<qf::client_t>();
 	g_rdpViewItem->set_qfclient_context(g_client);
+	g_client->rdpViewItem = g_rdpViewItem;
 
 	g_freerdp_thread = std::make_unique<std::thread>(rdp_loop_thread, argc, argv);
 

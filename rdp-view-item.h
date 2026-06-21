@@ -230,6 +230,43 @@ public:
         return QImage::fromData(bmp, "BMP");
     }
 
+    void updateClipboardFilesFromRemote(const std::vector<QString>& paths)
+    {
+        if (!m_qfClientContext || !m_qfClientContext->cliprdr_client_context_)
+        {
+            qf::log::debug("clipboard/remote", "no clipboard client context");
+            return;
+        }
+
+        if (paths.empty())
+        {
+            qf::log::warn("clipboard/remote", "files path is empty");
+            return;
+        }
+
+        QList<QUrl> urls;
+        for (const auto& path : paths)
+        {
+            if (QFileInfo::exists(path))
+                urls.append(QUrl::fromLocalFile(path));
+        }
+
+        if (urls.empty())
+        {
+            qf::log::warn("clipboard/remote", "no downloaded files exist");
+            return;
+        }
+
+        m_clipboardDataFromRemote = true;
+        auto* data = new QMimeData();
+        data->setUrls(urls);
+        QGuiApplication::clipboard()->setMimeData(data);
+        m_clipboardDataFromRemote = false;
+
+        qf::log::info("clipboard/remote", "updated local clipboard with remote files count={}",
+                      urls.size());
+    }
+
     void updateClipboardDataFromRemote(const QByteArray& data, uint32_t formatId,
                                        const QString& formatName) {
         if (!m_qfClientContext || !m_qfClientContext->cliprdr_client_context_)

@@ -10,6 +10,8 @@
 #include <string>
 #include <vector>
 
+class RdpViewItem;
+
 namespace qf {
 
 inline UINT to_freerdp_key_code(const QKeyEvent* event)
@@ -157,6 +159,7 @@ inline UINT to_freerdp_key_code(const QKeyEvent* event)
         wClipboard* clipboard_system_ = nullptr;
         std::vector<clipboard_info_file_t> clipboard_info_files_;
         CliprdrFileContext* cliprdr_file_context_ = nullptr;
+        RdpViewItem* rdpViewItem = nullptr;
         
     };
 

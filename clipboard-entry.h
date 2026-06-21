@@ -20,6 +20,7 @@
 #include <thread>
 #include <utility>
 #include <vector>
+#include "rdp-view-item.h"
 
 namespace qf
 {
@@ -39,21 +40,70 @@ public:
 
 		std::lock_guard<std::mutex> lock(m_remote_mutex);
 		m_remote_context = context;
+
+		auto batch = std::make_shared<remote_file_batch>();
+		batch->root_path = make_remote_batch_root();
+		if (!QDir().mkpath(batch->root_path))
+		{
+			qf::log::warn("cliprdr/remote-file", "failed to create batch root {}",
+			              batch->root_path.toStdString());
+			return;
+		}
+
 		for (size_t i = 0; i < files.size(); ++i)
 		{
+			const QString relativePath = safe_remote_relative_path(files[i].display_name_);
+			if (relativePath.isEmpty())
+			{
+				qf::log::warn("cliprdr/remote-file", "reject unsafe path name={}",
+				              files[i].display_name_.toStdString());
+				continue;
+			}
+
+			const QString localPath = QDir(batch->root_path).filePath(relativePath);
+			const QString topName = relativePath.section('/', 0, 0);
+			const QString topPath = QDir(batch->root_path).filePath(topName);
+			if (std::find(batch->top_paths.begin(), batch->top_paths.end(), topPath) ==
+			    batch->top_paths.end())
+			{
+				batch->top_paths.push_back(topPath);
+			}
+
 			if (files[i].is_directory_)
 			{
-				qf::log::info("cliprdr/remote-file", "skip directory name={}",
-				              files[i].display_name_.toStdString());
+				if (!QDir().mkpath(localPath))
+				{
+					qf::log::warn("cliprdr/remote-file", "failed to create directory {}",
+					              localPath.toStdString());
+				}
+				else
+				{
+					qf::log::debug("cliprdr/remote-file", "created directory path={}",
+					               localPath.toStdString());
+				}
+				continue;
+			}
+
+			if (!QDir().mkpath(QFileInfo(localPath).absolutePath()))
+			{
+				qf::log::warn("cliprdr/remote-file", "failed to create parent for {}",
+				              localPath.toStdString());
 				continue;
 			}
 
 			remote_file_job job;
 			job.list_index = static_cast<UINT32>(i);
 			job.display_name = files[i].display_name_;
+			job.local_path = localPath;
+			job.batch = batch;
 			m_remote_jobs.push(job);
+			++batch->remaining;
 		}
-		m_remote_cv.notify_one();
+
+		if (batch->remaining == 0)
+			publish_remote_batch(batch);
+		else
+			m_remote_cv.notify_one();
 	}
 
 	UINT server_file_contents_request(CliprdrClientContext* context,
@@ -112,10 +162,19 @@ public:
 	}
 
 private:
+	struct remote_file_batch
+	{
+		size_t remaining = 0;
+		QString root_path;
+		std::vector<QString> top_paths;
+	};
+
 	struct remote_file_job
 	{
 		UINT32 list_index = 0;
 		QString display_name;
+		QString local_path;
+		std::shared_ptr<remote_file_batch> batch;
 	};
 
 	enum class remote_request_kind
@@ -256,26 +315,30 @@ private:
 
 			if (!context)
 				continue;
+
 			download_remote_file(context, job);
+			if (--job.batch->remaining == 0)
+				publish_remote_batch(job.batch);
 		}
 	}
 
-	void download_remote_file(CliprdrClientContext* context, const remote_file_job& job)
+	QString download_remote_file(CliprdrClientContext* context, const remote_file_job& job)
 	{
+		// protocol: [SIZE flag the pdu] [RANGE flag the pdu]
 		uint64_t fileSize = 0;
 		if (!request_remote_size(context, job.list_index, fileSize))
 		{
 			qf::log::warn("cliprdr/remote-file", "failed to query size name={}",
 			              job.display_name.toStdString());
-			return;
+			return {};
 		}
 
-		const QString localPath = make_remote_output_path(job.display_name, job.list_index);
-		QFile file(localPath);
+		QFile file(job.local_path);
 		if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate))
 		{
-			qf::log::warn("cliprdr/remote-file", "failed to create {}", localPath.toStdString());
-			return;
+			qf::log::warn("cliprdr/remote-file", "failed to create {}",
+			              job.local_path.toStdString());
+			return {};
 		}
 
 		uint64_t offset = 0;
@@ -288,19 +351,25 @@ private:
 			{
 				qf::log::warn("cliprdr/remote-file", "failed range name={} offset={}",
 				              job.display_name.toStdString(), offset);
-				return;
+				file.close();
+				QFile::remove(job.local_path);
+				return {};
 			}
 
 			if (file.write(chunk.constData(), chunk.size()) != chunk.size())
 			{
-				qf::log::warn("cliprdr/remote-file", "failed write {}", localPath.toStdString());
-				return;
+				qf::log::warn("cliprdr/remote-file", "failed write {}",
+				              job.local_path.toStdString());
+				file.close();
+				QFile::remove(job.local_path);
+				return {};
 			}
 			offset += static_cast<uint64_t>(chunk.size());
 		}
 
 		qf::log::info("cliprdr/remote-file", "saved remote file name={} path={} bytes={}",
-		              job.display_name.toStdString(), localPath.toStdString(), fileSize);
+		              job.display_name.toStdString(), job.local_path.toStdString(), fileSize);
+		return job.local_path;
 	}
 
 	bool request_remote_size(CliprdrClientContext* context, UINT32 listIndex, uint64_t& size)
@@ -389,28 +458,60 @@ private:
 		return streamId == 0 ? m_next_stream_id++ : streamId;
 	}
 
-	static QString make_remote_output_path(const QString& displayName, UINT32 listIndex)
+	static QString safe_remote_relative_path(const QString& displayName)
 	{
 		QString normalized = displayName;
 		normalized.replace("\\", "/");
 
-		const QString fileName = QFileInfo(normalized).fileName();
-		const QString safeName = fileName.isEmpty() ? QStringLiteral("clipboard-file") : fileName;
-		const QString indexedName = QStringLiteral("%1-%2").arg(listIndex).arg(safeName);
-		const QString dirPath = QDir::tempPath() + QStringLiteral("/qfreerdp-clipboard-") +
-		                        QString::number(QCoreApplication::applicationPid());
-		QDir().mkpath(dirPath);
-		return QDir(dirPath).filePath(indexedName);
+		if (normalized.startsWith('/') ||
+		    (normalized.size() >= 2 && normalized[1] == ':'))
+			return {};
+
+		const QStringList parts = normalized.split('/', Qt::SkipEmptyParts);
+		if (parts.empty())
+			return {};
+
+		for (const QString& part : parts)
+		{
+			if (part == "." || part == "..")
+				return {};
+		}
+
+		return QDir::cleanPath(parts.join('/'));
+	}
+
+	QString make_remote_batch_root()
+	{
+		const QString name =
+		    QStringLiteral("qfreerdp-clipboard-%1-%2")
+		        .arg(QCoreApplication::applicationPid())
+		        .arg(m_next_batch_id++);
+		return QDir::temp().filePath(name);
+	}
+
+	void publish_remote_batch(const std::shared_ptr<remote_file_batch>& batch)
+	{
+		if (!batch || batch->top_paths.empty() || !m_client || !m_client->rdpViewItem)
+			return;
+
+		const auto paths = batch->top_paths;
+		RdpViewItem* viewItem = m_client->rdpViewItem;
+		QMetaObject::invokeMethod(
+		    viewItem,
+		    [viewItem, paths] { viewItem->updateClipboardFilesFromRemote(paths); },
+		    Qt::QueuedConnection);
 	}
 
 	std::mutex m_remote_mutex;
 	std::condition_variable m_remote_cv;
 	std::condition_variable m_remote_response_cv;
 	std::queue<remote_file_job> m_remote_jobs;
+
 	remote_pending_response m_pending;
 	CliprdrClientContext* m_remote_context = nullptr;
 	std::atomic<bool> m_remote_stopped = false;
 	std::unique_ptr<std::thread> m_remote_worker;
 	UINT32 m_next_stream_id = 1;
+	uint64_t m_next_batch_id = 1;
 };
 } // namespace qf
